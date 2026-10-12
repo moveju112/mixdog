@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Short-lived App Store signing for CI.
 
-`setup` creates an Apple Distribution certificate and App Store profiles for
-the app and its Notification Service Extension through the App Store Connect
-API, writes the certificate as a .p12 and installs the profiles. `cleanup`
-deletes the profiles and revokes the certificate, so no signing identity
-outlives the run and no device registration is needed.
+`setup` first revokes the certificate and deletes the profiles recorded by the
+previous CI runs, then creates an Apple Distribution certificate and App Store
+profiles for the app and its Notification Service Extension through the App
+Store Connect API, writes the certificate as a .p12 and installs the profiles.
+No device registration is needed.
+
+Revocation is deferred to the next run: App Store Connect processes an upload
+asynchronously, and a certificate revoked right after the upload fails that
+processing (ITMS-90035 Invalid Signature). So `cleanup` only removes local
+material (the .p12) and leaves the state file, which records this run's
+certificate and profile ids, for the workflow to upload as an artifact. The
+next run downloads the newest one to the same path and `setup` revokes exactly
+those ids (404 tolerated). Nothing is ever listed and revoked by type.
 
 Env: ASC_KEY_PATH, APPLE_API_KEY_ID, APPLE_API_ISSUER, RUNNER_TEMP.
 """
@@ -47,7 +55,7 @@ def token():
     )
 
 
-def call(method, path, body=None):
+def call(method, path, body=None, tolerate=()):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(API + path, data=data, method=method)
     req.add_header("Authorization", "Bearer " + token())
@@ -57,6 +65,8 @@ def call(method, path, body=None):
         with urllib.request.urlopen(req) as res:
             raw = res.read()
     except urllib.error.HTTPError as err:
+        if err.code in tolerate:
+            return {}
         sys.exit(f"{method} {path} failed: {err.code} {err.read().decode(errors='replace')}")
     return json.loads(raw) if raw else {}
 
@@ -77,7 +87,18 @@ def delete_profiles_named(name):
         call("DELETE", f"/profiles/{item['id']}")
 
 
+def revoke_previous():
+    # The state file is downloaded from the previous run's artifact; absent on a first run.
+    if not STATE.exists():
+        return
+    state = json.loads(STATE.read_text())
+    for profile in state["profiles"]:
+        call("DELETE", f"/profiles/{profile}", tolerate=(404,))
+    call("DELETE", f"/certificates/{state['certificate']}", tolerate=(404,))
+
+
 def setup():
+    revoke_previous()
     password = base64.urlsafe_b64encode(os.urandom(18)).decode()
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     csr = (x509.CertificateSigningRequestBuilder()
@@ -124,13 +145,9 @@ def setup():
 
 
 def cleanup():
-    if not STATE.exists():
-        return
-    state = json.loads(STATE.read_text())
-    for profile in state["profiles"]:
-        call("DELETE", f"/profiles/{profile}")
-    call("DELETE", f"/certificates/{state['certificate']}")
-    STATE.unlink()
+    # Local material only. This run's certificate and profiles stay valid until
+    # the next run's setup revokes them (the state file is kept for the artifact).
+    (TEMP / "dist.p12").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
