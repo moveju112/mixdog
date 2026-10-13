@@ -89,8 +89,9 @@ export function ContextUsageIndicator({
   // The card hangs 6px off the gauge, so the pointer heading for it leaves the
   // gauge first; the shared hover contract holds the card through that trip
   // instead of closing on the frame the pointer crosses the gap.
-  const popover = useHoverPopover({ open: controlledOpen, onOpenChange });
+  const popover = useHoverPopover({ open: controlledOpen, onOpenChange, openDelayMs: 200 });
   const popoverOpen = popover.open;
+  const actionsVisible = popover.pinned || controlledOpen === true;
   const context = contextMetrics(snapshot);
   const descriptionId = `context-usage-${String(snapshot.sessionId || 'session')}`;
   const contextPercent = context?.percent ?? 0;
@@ -178,7 +179,7 @@ export function ContextUsageIndicator({
               <b>{uiCurrency(cost, cost >= 1 ? 2 : 3)}</b>
             </div>
           )}
-          {onViewDetails && (
+          {actionsVisible && onViewDetails && (
             <button
               type="button"
               className="context-action context-details"
@@ -193,7 +194,7 @@ export function ContextUsageIndicator({
           )}
           {/* One mutating action at a time: a model switch offers inheritance;
           a completed handover or matching model offers plain compaction. */}
-          {offerInheritance ? (
+          {actionsVisible && (offerInheritance ? (
             <button
               type="button"
               className="context-action context-inherit"
@@ -217,7 +218,7 @@ export function ContextUsageIndicator({
               <FoldVertical size={14} aria-hidden="true" />
               {t('Compact context')}
             </button>
-          )}
+          ))}
         </div>
       )}
     </div>

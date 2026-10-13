@@ -73,6 +73,36 @@ test('the card survives the trip from the control to the card', async () => {
   await harness.cleanup();
 });
 
+test('delayed hover cancels on leave and starts a fresh delay on re-entry', async () => {
+  const harness = mount({ openDelayMs: 80 });
+  await harness.render();
+  await act(async () => harness.seen.popover.hostProps.onMouseEnter());
+  assert.equal(harness.seen.popover.open, false);
+  await act(async () => harness.seen.popover.hostProps.onMouseLeave());
+  await settle();
+  assert.equal(harness.seen.popover.open, false);
+  await act(async () => harness.seen.popover.hostProps.onMouseEnter());
+  assert.equal(harness.seen.popover.open, false);
+  await settle();
+  assert.equal(harness.seen.popover.open, true);
+  await harness.cleanup();
+});
+
+test('click opens immediately and Escape cancels any pending hover opening', async () => {
+  const harness = mount({ openDelayMs: 80 });
+  await harness.render();
+  await act(async () => harness.seen.popover.hostProps.onMouseEnter());
+  await act(async () => harness.seen.popover.triggerProps.onClick());
+  assert.equal(harness.seen.popover.pinned, true);
+  assert.equal(harness.seen.popover.open, true);
+  await act(async () => {
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  });
+  await settle();
+  assert.equal(harness.seen.popover.open, false);
+  await harness.cleanup();
+});
+
 test('a pointer that never comes back closes the card after the grace window', async () => {
   const harness = mount();
   await harness.render();

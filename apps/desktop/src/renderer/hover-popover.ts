@@ -43,16 +43,19 @@ type HoverPopover = {
 export function useHoverPopover({
   open: controlledOpen,
   onOpenChange,
+  openDelayMs = 0,
   closeDelayMs = HOVER_POPOVER_CLOSE_DELAY_MS,
 }: {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  openDelayMs?: number;
   closeDelayMs?: number;
 } = {}): HoverPopover {
   const [localOpen, setLocalOpen] = useState(false);
   const [pinned, setPinnedState] = useState(false);
   const open = controlledOpen ?? localOpen;
   const host = useRef<HTMLDivElement | null>(null);
+  const openTimer = useRef<number | null>(null);
   const closeTimer = useRef<number | null>(null);
   // The grace timer reads the pin it fires under, not the one captured when it
   // was scheduled: a click during the window has to survive.
@@ -62,6 +65,13 @@ export function useHoverPopover({
   // the same card the desktop shows on hover.
   const touch = touchPrimaryPointer();
 
+  // 대기 중인 호버 열기 취소 (이탈·클릭·닫기 -> 지연 재열기 방지).
+  const cancelOpen = useCallback(() => {
+    if (openTimer.current === null) return;
+    window.clearTimeout(openTimer.current);
+    openTimer.current = null;
+  }, []);
+
   const cancelClose = useCallback(() => {
     if (closeTimer.current === null) return;
     window.clearTimeout(closeTimer.current);
@@ -70,11 +80,12 @@ export function useHoverPopover({
 
   const setOpen = useCallback(
     (next: boolean) => {
+      cancelOpen();
       cancelClose();
       if (controlledOpen === undefined) setLocalOpen(next);
       onOpenChange?.(next);
     },
-    [cancelClose, controlledOpen, onOpenChange]
+    [cancelOpen, cancelClose, controlledOpen, onOpenChange]
   );
 
   const setPinned = useCallback((next: boolean) => {
@@ -102,7 +113,10 @@ export function useHoverPopover({
     );
   }, [cancelClose, closeDelayMs, controlledOpen, onOpenChange]);
 
-  useEffect(() => cancelClose, [cancelClose]);
+  useEffect(() => () => {
+    cancelOpen();
+    cancelClose();
+  }, [cancelOpen, cancelClose]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -124,10 +138,11 @@ export function useHoverPopover({
 
   useEffect(() => {
     if (controlledOpen === false) {
+      cancelOpen();
       cancelClose();
       setPinned(false);
     }
-  }, [cancelClose, controlledOpen, setPinned]);
+  }, [cancelOpen, cancelClose, controlledOpen, setPinned]);
 
   // ABB: a tapped-open card closes on hardware back.
   useMobileBack(open, close);
@@ -145,11 +160,22 @@ export function useHoverPopover({
     hostProps: {
       ref: host,
       onMouseEnter: () => {
-        if (!touch) setOpen(true);
+        if (touch) return;
+        cancelOpen();
+        cancelClose();
+        if (open || openDelayMs <= 0) {
+          setOpen(true);
+          return;
+        }
+        openTimer.current = window.setTimeout(() => {
+          openTimer.current = null;
+          setOpen(true);
+        }, openDelayMs);
       },
       // A pinned card ignores the pointer leaving; an unpinned one only starts
       // the grace timer.
       onMouseLeave: () => {
+        cancelOpen();
         if (!touch && !pinnedRef.current) scheduleClose();
       },
     },
