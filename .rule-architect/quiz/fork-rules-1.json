@@ -1,0 +1,50 @@
+{
+  "runId": "fork-rules-1",
+  "lang": "en",
+  "questions": [
+    {
+      "id": "q1",
+      "type": "recall",
+      "question": "Where may fork product edits be made, and what must accompany each fork code change?",
+      "answer": "Fork product edits belong under apps/mobile/**. An unavoidable outside edit requires a stated necessity. Each fork code change must have surrounding Korean [FORK:Fxxx] markers documenting summary, upstream behavior, fork behavior, reason and conditional default conflict decision, plus a docs/ai-rules/FORK_CHANGES.md ledger entry using a sequential, never-reused ID.",
+      "expected": "Only apps/mobile/** (outside edits need necessity + same markers + ledger); Korean [FORK:Fxxx] start/end markers with 원본/포크/이유/원본 동일 수정 시 fields and a FORK_CHANGES.md ledger entry.",
+      "correct": true
+    },
+    {
+      "id": "q2",
+      "type": "recall",
+      "question": "The last fork build was 0.1.13.1 and upstream mobile is still 0.1.13. What versionName and versionCode does the next fork build use? What if upstream mobile moved to 0.1.14?",
+      "answer": "Upstream remains 0.1.13: versionName 0.1.13.2, versionCode 101302. Upstream moves to 0.1.14: counter resets to 1, versionName 0.1.14.1, versionCode 101401.",
+      "expected": "0.1.13.2 / 101302; after upstream 0.1.14 the counter resets: 0.1.14.1 / 101401.",
+      "correct": true
+    },
+    {
+      "id": "q3",
+      "type": "recall",
+      "question": "During an upstream sync, which command lists the fork blocks, and with which git operation is upstream brought into main?",
+      "answer": "List fork blocks with git grep -n \"\\[FORK:\". Bring upstream into clean main with git merge upstream/main or git merge vX.Y.Z; never rebase/reset main onto upstream.",
+      "expected": "git grep -n \"\\[FORK:\"; git merge upstream/main or a vX.Y.Z tag, never rebase/reset.",
+      "correct": true
+    },
+    {
+      "id": "q4",
+      "type": "judgment",
+      "question": "Upstream changed the release URL constants in MixdogAppUpdater.java, conflicting with F001. Is it acceptable to resolve with git checkout --theirs on that file?",
+      "answer": "No. Whole-file git checkout --theirs is explicitly prohibited. F001 is fork identity (case d): preserve moveju112/mixdog release URLs and markers even when upstream changes the same lines. Resolve per block, retaining unrelated upstream changes and adopting security fixes before safely reapplying fork intent.",
+      "expected": "No: whole-file ours/theirs is forbidden and F001 is identity case d, so the fork URLs are kept while other upstream changes are merged per block.",
+      "correct": true
+    },
+    {
+      "id": "q5",
+      "type": "negative",
+      "question": "Which Firebase project ID should the fork use for FCM push notifications?",
+      "answer": "not in the rules, check the source",
+      "expected": "not in the rules, check the source",
+      "correct": true
+    }
+  ],
+  "correct": 5,
+  "total": 5,
+  "negativePassed": true,
+  "passed": true
+}

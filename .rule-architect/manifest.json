@@ -1,0 +1,73 @@
+{
+  "schema": "rule-architect/manifest@3",
+  "files": {
+    ".rule-architect/decisions.json": {
+      "type": "file",
+      "sha256": "a5351bda97cb835e62fd24adef934e56800771bd6b12f6c6fb8695f7a996b6a7",
+      "lines": 118
+    },
+    ".rule-architect/scan-current.json": {
+      "type": "file",
+      "sha256": "d5e66d40eddbf844b2f4f4acc9c4d1cb18747232c93562fcd749081b42e62641",
+      "lines": 306
+    },
+    ".rule-architect/scan.json": {
+      "type": "file",
+      "sha256": "f6a6922d2a3d8b0c8f15e1ea030b00c15871a8a964ec062ef981991bb789f862",
+      "lines": 302
+    },
+    "AGENTS.md": {
+      "type": "symlink",
+      "target": "AI_RULES.md"
+    },
+    "AI_RULES.md": {
+      "type": "file",
+      "sha256": "8994e978adb5d25464a583d48a1c6384ada2b3cc76139a588c054b36b0de6dcf",
+      "lines": 46
+    },
+    "CLAUDE.md": {
+      "type": "symlink",
+      "target": "AI_RULES.md"
+    },
+    "docs/ai-rules/ARCHITECTURE.md": {
+      "type": "file",
+      "sha256": "fc12cb2af6226e977bcafa8351195e98bc5a93d16fdc69e6a23eacdb51a923e5",
+      "lines": 53
+    },
+    "docs/ai-rules/CODING_RULES.md": {
+      "type": "file",
+      "sha256": "a98951c4affceccf68396951cfd93c36a94345a96f4d6d4ad6a3223b40a4db03",
+      "lines": 34
+    },
+    "docs/ai-rules/DEPLOY.md": {
+      "type": "file",
+      "sha256": "830c43a11083baa800d735ec2310b7cb477e07e69bd9bba6f6bbaad46cc242e8",
+      "lines": 21
+    },
+    "docs/ai-rules/FORK_CHANGES.md": {
+      "type": "file",
+      "sha256": "6571a4a466e7643eac77bdaf4a528d12fc5b869aeebc7dd4af14ebe2a5781dac",
+      "lines": 57
+    },
+    "docs/ai-rules/FORK_RULES.md": {
+      "type": "file",
+      "sha256": "dd608d81264ef76f829b4a68b64428970f2bbf600729d2928604d08cff5301d4",
+      "lines": 74
+    },
+    "docs/ai-rules/PITFALLS.md": {
+      "type": "file",
+      "sha256": "386837d5169a121db568ad4dcf85555ebf318cda8d0c930c7650e51cf2be0c21",
+      "lines": 60
+    },
+    "docs/ai-rules/tasks/RELEASE_APK.md": {
+      "type": "file",
+      "sha256": "0b69e0a31ebe3671a6c08042bb555f2286ec8f8aed147ae7d614e91a5af2c759",
+      "lines": 25
+    },
+    "docs/ai-rules/tasks/SYNC_UPSTREAM.md": {
+      "type": "file",
+      "sha256": "bbafa69eeaf36c805d1c0e581a30c7c010d16a65fb0894177d5672b1a84476ac",
+      "lines": 24
+    }
+  }
+}

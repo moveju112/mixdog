@@ -1,0 +1,305 @@
+{
+  "apiRouteFiles": [],
+  "brokenRuleLinks": [],
+  "coChange": {
+    "available": true,
+    "commitsScanned": 500,
+    "commitsWithCurrentFiles": 490,
+    "groups": [
+      {
+        "files": [
+          "package-lock.json",
+          "package.json"
+        ],
+        "times": 21
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "apps/desktop/package-lock.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "apps/desktop/package.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "apps/relay/package-lock.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "apps/relay/package.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "package-lock.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "CHANGELOG.md",
+          "package.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "apps/desktop/package-lock.json",
+          "apps/desktop/package.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "apps/desktop/package-lock.json",
+          "apps/relay/package-lock.json"
+        ],
+        "times": 19
+      },
+      {
+        "files": [
+          "apps/desktop/package-lock.json",
+          "apps/relay/package.json"
+        ],
+        "times": 19
+      }
+    ],
+    "truncated": true
+  },
+  "counts": {
+    "bytes": 117304950,
+    "files": 7131,
+    "signalFiles": 7015
+  },
+  "decisions": [
+    {
+      "condition": "dedicated controller/handler layer directory exists",
+      "doc": "CONTROLLER_RULES.md",
+      "evidence": [],
+      "id": "controller",
+      "met": false,
+      "status": "not_met"
+    },
+    {
+      "condition": "api/routes source layer or explicit /api or /vN routes exist",
+      "doc": "API_RULES.md",
+      "evidence": [],
+      "id": "api",
+      "met": false,
+      "status": "not_met"
+    },
+    {
+      "condition": ">=3 files define enum/status-code value sets",
+      "doc": "ENUM_CODES.md",
+      "evidence": [
+        "apps/desktop/electron.vite.config.ts",
+        "apps/desktop/src/main/browser/command.ts",
+        "apps/desktop/src/main/browser/page-identity-capture.ts",
+        "apps/desktop/src/main/browser/timing.test.mjs",
+        "apps/desktop/src/main/capture-window.ts"
+      ],
+      "id": "enum-codes",
+      "met": true,
+      "status": "met"
+    },
+    {
+      "condition": "response serialization or envelope conventions exist in an API/controller layer",
+      "doc": "RESPONSE_KEYS.md",
+      "evidence": [],
+      "id": "response-keys",
+      "met": false,
+      "status": "not_met"
+    },
+    {
+      "condition": "ORM, SQL access layer, or migrations exist",
+      "doc": "DB_RULES.md",
+      "evidence": [],
+      "id": "database",
+      "met": false,
+      "status": "not_met"
+    },
+    {
+      "condition": "deploy scripts, deployment workflows, unit files, or container files exist",
+      "doc": "DEPLOY.md",
+      "evidence": [
+        ".github/workflows/deploy.yml",
+        ".github/workflows/graph-release.yml",
+        ".github/workflows/patch-release.yml",
+        ".github/workflows/release-gate.yml",
+        ".github/workflows/release.yml"
+      ],
+      "id": "deploy",
+      "met": true,
+      "status": "met"
+    },
+    {
+      "condition": "a file set changed together >=3 times",
+      "doc": "tasks/ADD_<TASK>.md",
+      "evidence": [
+        "package-lock.json + package.json",
+        "CHANGELOG.md + apps/desktop/package-lock.json",
+        "CHANGELOG.md + apps/desktop/package.json",
+        "CHANGELOG.md + apps/relay/package-lock.json",
+        "CHANGELOG.md + apps/relay/package.json"
+      ],
+      "id": "recurring-task",
+      "met": true,
+      "status": "met"
+    }
+  ],
+  "deployFiles": [
+    ".github/workflows/deploy.yml",
+    ".github/workflows/graph-release.yml",
+    ".github/workflows/patch-release.yml",
+    ".github/workflows/release-gate.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/spawn-release.yml",
+    "apps/relay/deploy/99-mixdog-net.conf",
+    "apps/relay/deploy/README.md",
+    "apps/relay/deploy/deploy-release.sh",
+    "apps/relay/deploy/deploy.sh",
+    "apps/relay/deploy/mixdog-net-tune.service",
+    "apps/relay/deploy/mixdog-relay.service",
+    "apps/relay/deploy/release-transaction.sh",
+    "apps/relay/deploy/release-transaction.test.mjs",
+    "apps/relay/deploy/release-transaction.test.sh",
+    "apps/relay/deploy/renderer-delta.mjs",
+    "apps/relay/deploy/renderer-delta.test.mjs",
+    "apps/relay/deploy/renderer-releases.mjs",
+    "apps/relay/deploy/renderer-releases.test.mjs",
+    "apps/relay/deploy/verify-release.mjs",
+    "apps/relay/deploy/verify-release.test.mjs"
+  ],
+  "enumFiles": [
+    "apps/desktop/electron.vite.config.ts",
+    "apps/desktop/src/main/browser/command.ts",
+    "apps/desktop/src/main/browser/page-identity-capture.ts",
+    "apps/desktop/src/main/browser/timing.test.mjs",
+    "apps/desktop/src/main/capture-window.ts",
+    "apps/desktop/src/main/computer/host/window-settle.ts",
+    "apps/desktop/src/main/computer/input/guards.ts",
+    "apps/desktop/src/main/computer/observation/capture-image-dedup.test.mjs",
+    "apps/desktop/src/main/computer/session/chrome-setup.ts",
+    "apps/desktop/src/main/ipc-validation.ts",
+    "apps/desktop/src/main/language-server-manager.ts",
+    "apps/desktop/src/main/ssh/ssh-host-store.ts",
+    "apps/desktop/src/main/ssh/ssh-ipc-attempts.ts",
+    "apps/desktop/src/main/window-options.ts",
+    "apps/desktop/src/main/worktree-validation.ts",
+    "apps/desktop/src/preload/index.ts",
+    "apps/desktop/src/preload/remote-window.ts",
+    "apps/desktop/src/renderer/CapabilityIcon.tsx",
+    "apps/desktop/src/renderer/ExtensionsView.tsx",
+    "apps/desktop/src/renderer/SessionGoalIsland.tsx",
+    "apps/desktop/src/renderer/VisualizeElements.tsx",
+    "apps/desktop/src/renderer/app-shell-components.tsx",
+    "apps/desktop/src/renderer/editor-code-graph.ts",
+    "apps/desktop/src/renderer/editor-monaco-bootstrap.ts",
+    "apps/desktop/src/renderer/file-thumbnail-art.tsx",
+    "apps/desktop/src/renderer/git-refresh-scheduler.ts",
+    "apps/desktop/src/renderer/remote-pairing-recovery.ts",
+    "apps/desktop/src/renderer/remote-shim.ts",
+    "apps/desktop/src/renderer/rich-markdown/RichMarkdownToolbar.tsx",
+    "apps/desktop/src/renderer/settings/settings-items.ts",
+    "apps/desktop/src/renderer/use-app-submit-routing.ts",
+    "apps/desktop/src/shared/contract-ipc.ts",
+    "apps/desktop/src/shared/file-downloads.ts",
+    "apps/desktop/src/shared/remote-e2ee.ts",
+    "apps/desktop/src/shared/remote-window.ts",
+    "apps/mobile/ios/App/App/MixdogNativeBridge.swift",
+    "apps/mobile/ios/App/Shared/MixdogKeychain.swift",
+    "apps/mobile/ios/App/Shared/NativePushCrypto.swift",
+    "apps/mobile/src/pairing-ui.ts",
+    "native/mixdog-browser-import/src/cookies.rs"
+  ],
+  "existingRuleFiles": [
+    "AGENTS.md",
+    "AI_RULES.md",
+    "CLAUDE.md"
+  ],
+  "gitHead": "11e7110fb54d1d43189ab4f53c977edcae381207",
+  "layers": {
+    "service": [
+      "src/session-runtime/services"
+    ],
+    "test": [
+      "native/mixdog-graph/tests",
+      "native/mixdog-patch/tests",
+      "native/mixdog-spawn/tests",
+      "src/runtime/tidy/rules/__tests__"
+    ]
+  },
+  "limits": {
+    "maxBytes": 209715200,
+    "maxCommits": 500,
+    "maxFiles": 20000
+  },
+  "ormModelFiles": [],
+  "responseFiles": [],
+  "root": "/home/ubuntu/project/mixdog",
+  "scanScope": {
+    "docsDir": "docs/ai-rules",
+    "entries": [
+      "CLAUDE.md",
+      "AGENTS.md"
+    ],
+    "excludedDirs": [
+      "benchmarks"
+    ]
+  },
+  "schema": "rule-architect/scan@3",
+  "sourceFingerprint": "b19365ffced9dbb53a72229d3b640d203e9e0279b6a6299ebd32d224de860295",
+  "sqlAccessFiles": [],
+  "stack": [
+    {
+      "files": 4595,
+      "stack": "javascript"
+    },
+    {
+      "files": 1596,
+      "stack": "typescript"
+    },
+    {
+      "files": 107,
+      "stack": "rust"
+    },
+    {
+      "files": 17,
+      "stack": "shell"
+    },
+    {
+      "files": 16,
+      "stack": "java"
+    },
+    {
+      "files": 15,
+      "stack": "csharp"
+    },
+    {
+      "files": 7,
+      "stack": "swift"
+    },
+    {
+      "files": 6,
+      "stack": "python"
+    }
+  ],
+  "truncated": {
+    "bytes": false,
+    "commits": true,
+    "files": false
+  }
+}
