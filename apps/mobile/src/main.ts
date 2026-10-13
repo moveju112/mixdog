@@ -62,7 +62,7 @@ const OFFERABLE_STATUSES = new Set(['available', 'downloading', 'ready', 'needs-
 // 원본: https://github.com/tribgames/mixdog/releases
 // 포크: https://github.com/moveju112/mixdog/releases
 // 이유: 네이티브 업데이터(MixdogAppUpdater.java)와 같은 포크 릴리스를 안내해야 함
-// 원본 동일 수정 시: 포크 유지
+// 원본 동일 수정 시: 포크 유지 — 릴리스 링크는 항상 포크 저장소를 가리켜야 함
 const RELEASES_URL = 'https://github.com/moveju112/mixdog/releases';
 // [FORK:F001] 끝
 
