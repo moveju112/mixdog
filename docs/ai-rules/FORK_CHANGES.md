@@ -5,7 +5,7 @@ Upstream mobile baseline: **mobile-v0.1.13**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
-Next unused ID: **F006** (check all active and retired entries before allocation).
+Next unused ID: **F007** (check all active and retired entries before allocation).
 
 ## F001 — Fork update channel
 
@@ -43,9 +43,7 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogA
 
 Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java:140`.
 
-### History
-
-- 2026-10-13: introduced for fork build `0.1.13.002`.
+History: 2026-10-13 introduced for fork build `0.1.13.002`.
 
 ## F003 — Wider phone session drawer
 
@@ -63,9 +61,7 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainAct
 
 Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:83`.
 
-### History
-
-- 2026-10-13: introduced for fork build `0.1.13.003`.
+History: 2026-10-13 introduced for fork build `0.1.13.003`.
 
 ## F004 — Launch straight into the saved PC
 
@@ -82,9 +78,7 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogN
 
 Evidence: `evidence: apps/mobile/src/main.ts:414`, `evidence: apps/mobile/src/main.ts:103`.
 
-### History
-
-- 2026-10-13: introduced for fork build `0.1.13.003`.
+History: 2026-10-13 introduced for fork build `0.1.13.003`.
 
 ## F005 — Update lookup on every app launch
 
@@ -101,9 +95,25 @@ Evidence: `evidence: apps/mobile/src/main.ts:414`, `evidence: apps/mobile/src/ma
 
 Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:79`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:194`.
 
-### History
+History: 2026-10-13 introduced for fork build `0.1.13.003`.
 
-- 2026-10-13: introduced for fork build `0.1.13.003`.
+## F006 — Web links open in the system browser on the phone
+
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java` (`register`, `SYSTEM_BROWSER_LINK_SCRIPT`, `openExternalUrl`) |
+| Summary | A document-start window-capture click handler sends unmodified taps on cross-origin `http(s)` `a[href]` links to `openExternalUrl` (Android `ACTION_VIEW`) |
+| Upstream behavior | `linkOpenTarget` (`apps/desktop/src/renderer/link-open-target.ts`) opens chat web links in the session's Mixdog browser pane (Browser Use) |
+| Fork behavior | Phone link taps go to the system browser; same-origin, non-web, modified and long-press menu actions are untouched; agent-opened pages still use the pane |
+| Reason | Browser Use is not wanted on the phone |
+| Default decision | **Merge** (`병합`): adopt upstream if the phone default becomes the system browser; reapply if link DOM changes |
+| Coupling | Depends on chat web links being `a[href]` with the target URL (`apps/desktop/src/renderer/MarkdownLink.tsx`) and on `data-mixdog-mobile-tabs`; check both on every sync |
+| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+
+Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:93`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:273`.
+
+History: 2026-10-13 introduced for fork build `0.1.13.004`.
 
 ## Fork-owned files (no markers required)
 
@@ -129,6 +139,7 @@ New rule/audit files under these owned paths extend this section's ownership wit
 | `mobile-v0.1.13` | 1 (pre-padding) | `0.1.13.1` | `101301` | 2026-10-13 | `765857f75` | published | `mobile-v0.1.13.1` |
 | `mobile-v0.1.13` | 002 | `0.1.13.002` | `101302` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.002` |
 | `mobile-v0.1.13` | 003 | `0.1.13.003` | `101303` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.003` |
+| `mobile-v0.1.13` | 004 | `0.1.13.004` | `101304` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.004` |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.

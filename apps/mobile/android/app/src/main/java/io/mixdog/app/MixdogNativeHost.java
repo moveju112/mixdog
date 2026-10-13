@@ -1,6 +1,7 @@
 package io.mixdog.app;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.net.Uri;
@@ -89,7 +90,34 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
       WebViewCompat.addDocumentStartJavaScript(webView, DRAWER_WIDTH_SCRIPT, Collections.singleton("*"));
     }
     // [FORK:F003] 끝
+    // [FORK:F006] 시작 — 폰에서 채팅 웹 링크를 Mixdog 브라우저 패널(Browser Use) 대신 시스템 브라우저로 열기
+    // 원본: relay 웹앱의 linkOpenTarget 이 세션 브라우저 패널을 기본으로 선택
+    // 포크: 링크 탭을 페이지보다 먼저(window capture) 가로채 다른 출처 http(s) 링크는 openExternalUrl 로 시스템 브라우저에 전달
+    // 이유: 폰에서는 Browser Use 를 쓰지 않고 시스템 브라우저(Chrome 등)로 보기 위함
+    // 원본 동일 수정 시: 병합 — 원본이 폰 기본값을 시스템 브라우저로 바꾸면 원본 채택, 링크 DOM 이 바뀌면 새 구조로 다시 적용
+    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+      WebViewCompat.addDocumentStartJavaScript(webView, SYSTEM_BROWSER_LINK_SCRIPT, Collections.singleton("*"));
+    }
+    // [FORK:F006] 끝
   }
+
+  // [FORK:F006] 시작 — 링크 가로채기 스크립트 (relay 웹앱 폰 화면 html[data-mixdog-mobile-tabs] 에서만 동작)
+  // 원본: 없음
+  // 포크: 수정키 없는 왼쪽 탭 + 다른 출처 http(s) a[href] → 기본 동작·페이지 핸들러 차단 후 네이티브 openExternalUrl 호출 (id -1: 페이지의 응답 대기와 충돌 방지)
+  // 이유: 위 register() 의 F006 블록과 동일
+  // 원본 동일 수정 시: 병합 — 위 F006 블록과 함께 판단
+  private static final String SYSTEM_BROWSER_LINK_SCRIPT =
+      "(function(){window.addEventListener('click',function(e){"
+          + "if(e.defaultPrevented||e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey)return;"
+          + "if(!document.documentElement.hasAttribute('data-mixdog-mobile-tabs'))return;"
+          + "var host=window.MixdogNativeHost;if(!host||typeof host.postMessage!=='function')return;"
+          + "var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;"
+          + "var u;try{u=new URL(a.getAttribute('href'),location.href);}catch(_){return;}"
+          + "if((u.protocol!=='http:'&&u.protocol!=='https:')||u.origin===location.origin)return;"
+          + "e.preventDefault();e.stopImmediatePropagation();"
+          + "host.postMessage(JSON.stringify({id:-1,method:'openExternalUrl',args:{url:u.href}}));"
+          + "},true);})();";
+  // [FORK:F006] 끝
 
   // [FORK:F003] 시작 — 서랍 폭 덮어쓰기 스타일 (html[data-mixdog-mobile-tabs] 는 relay 웹앱의 폰 화면에만 존재)
   // 원본: 없음
@@ -242,6 +270,20 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
           return updater.dismiss(args.optString("version", "")).toString();
         case "openAppUpdateInBrowser":
           return updater.openInBrowser() ? "true" : "false";
+        // [FORK:F006] 시작 — 웹 링크를 안드로이드 시스템 브라우저로 열기
+        // 원본: 없음
+        // 포크: http/https 주소만 ACTION_VIEW 로 시스템 브라우저에 전달, 그 외 스킴은 거부
+        // 이유: register() 의 F006 링크 가로채기 스크립트가 호출
+        // 원본 동일 수정 시: 병합 — 원본에 같은 기능이 생기면 원본 메서드로 교체
+        case "openExternalUrl":
+          {
+            Uri link = Uri.parse(args.optString("url", ""));
+            String scheme = link.getScheme();
+            if (!"https".equalsIgnoreCase(scheme) && !"http".equalsIgnoreCase(scheme)) return "false";
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, link).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return "true";
+          }
+        // [FORK:F006] 끝
         case "openHostPicker":
           activity.runOnUiThread(
               () ->
