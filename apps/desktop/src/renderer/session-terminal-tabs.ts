@@ -54,15 +54,15 @@ function initialState(sessionId: string): SessionTerminalTabsState {
 
 function parseState(sessionId: string, raw: unknown): SessionTerminalTabsState | null {
   const value = raw as Partial<SessionTerminalTabsState> | null;
-  if (!value || !Array.isArray(value.tabs) || !value.tabs.length) return null;
+  if (!value || !Array.isArray(value.tabs)) return null;
   const tabs: SessionTerminalTab[] = [];
   for (const item of value.tabs as Partial<SessionTerminalTab>[]) {
     const n = item?.n;
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || tabs.some((tab) => tab.n === n)) return null;
     tabs.push({ id: sessionTerminalTabId(sessionId, n), n, shell: typeof item.shell === 'string' ? item.shell : '' });
   }
-  const activeId = tabs.some((tab) => tab.id === value.activeId) ? (value.activeId as string) : tabs[0].id;
-  const nextN = Math.max(Number.isInteger(value.nextN) ? (value.nextN as number) : 0, ...tabs.map((tab) => tab.n + 1));
+  const activeId = tabs.some((tab) => tab.id === value.activeId) ? (value.activeId as string) : (tabs[0]?.id ?? '');
+  const nextN = Math.max(2, Number.isInteger(value.nextN) ? (value.nextN as number) : 0, ...tabs.map((tab) => tab.n + 1));
   return { tabs, activeId, nextN };
 }
 
@@ -105,20 +105,15 @@ export function selectSessionTerminalTab(sessionId: string, id: string): void {
   commit(sessionId, { ...state, activeId: id });
 }
 
-/** Remove a tab; closing the last one leaves a fresh default tab. Returns the
+/** Remove a tab; closing the last one leaves no tabs. Returns the
  *  closed terminal id (to dispose), or null when `id` is not a tab. */
 export function closeSessionTerminalTab(sessionId: string, id: string): string | null {
   const state = getSessionTerminalTabs(sessionId);
   const index = state.tabs.findIndex((tab) => tab.id === id);
   if (index < 0) return null;
   const tabs = state.tabs.filter((tab) => tab.id !== id);
-  let { nextN } = state;
-  if (!tabs.length) {
-    tabs.push({ id: sessionTerminalTabId(sessionId, nextN), n: nextN, shell: '' });
-    nextN += 1;
-  }
-  const activeId = state.activeId === id ? (tabs[Math.min(index, tabs.length - 1)] ?? tabs[0]).id : state.activeId;
-  commit(sessionId, { tabs, activeId, nextN });
+  const activeId = state.activeId === id ? (tabs[Math.min(index, tabs.length - 1)] ?? tabs[0])?.id ?? '' : state.activeId;
+  commit(sessionId, { tabs, activeId, nextN: state.nextN });
   return id;
 }
 

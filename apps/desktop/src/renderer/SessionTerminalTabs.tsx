@@ -43,6 +43,10 @@ export function SessionTerminalTabs({
   onToggleExpanded?(): void;
 }) {
   const state = useSyncExternalStore(subscribeSessionTerminalTabs, () => getSessionTerminalTabs(sessionId));
+  // 패널을 다시 열 때만 기본 탭 생성 (마지막 탭 닫기 -> 자동 재생성 방지).
+  useEffect(() => {
+    if (active && !getSessionTerminalTabs(sessionId).tabs.length) openSessionTerminalTab(sessionId);
+  }, [active, sessionId]);
   const strip = useRef<HTMLDivElement | null>(null);
   const [shells, setShells] = useState<ShellProfilesState>(() => {
     const cached = cachedShellProfiles();
@@ -100,6 +104,7 @@ export function SessionTerminalTabs({
   );
   const closeTab = (id: string) => {
     if (!closeSessionTerminalTab(sessionId, id)) return;
+    if (!getSessionTerminalTabs(sessionId).tabs.length) requestPaneDockClose('terminal');
     // Dispose after the pane has unmounted so its cleanup cannot re-persist
     // the disposed terminal's view state.
     setTimeout(() => void disposeTerminalPane(id), 0);
