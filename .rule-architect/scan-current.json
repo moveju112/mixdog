@@ -4,7 +4,7 @@
   "coChange": {
     "available": true,
     "commitsScanned": 500,
-    "commitsWithCurrentFiles": 490,
+    "commitsWithCurrentFiles": 489,
     "groups": [
       {
         "files": [
@@ -80,7 +80,7 @@
     "truncated": true
   },
   "counts": {
-    "bytes": 117304950,
+    "bytes": 117305260,
     "files": 7131,
     "signalFiles": 7015
   },
@@ -230,7 +230,7 @@
     "AI_RULES.md",
     "CLAUDE.md"
   ],
-  "gitHead": "11e7110fb54d1d43189ab4f53c977edcae381207",
+  "gitHead": "6edc70a14186b264527958ca59c19779be5c684f",
   "layers": {
     "service": [
       "src/session-runtime/services"
@@ -261,7 +261,7 @@
     ]
   },
   "schema": "rule-architect/scan@3",
-  "sourceFingerprint": "b19365ffced9dbb53a72229d3b640d203e9e0279b6a6299ebd32d224de860295",
+  "sourceFingerprint": "4a03de398360bada580e1ef288f57013bcd9ec0d1ecb97ba9e58bcdcef8481a0",
   "sqlAccessFiles": [],
   "stack": [
     {
