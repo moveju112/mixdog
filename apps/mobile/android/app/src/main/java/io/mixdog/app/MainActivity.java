@@ -137,16 +137,18 @@ public class MainActivity extends BridgeActivity {
     intent.removeExtra(MixdogNotifications.EXTRA_ACTION);
   }
 
-  // Immersive shell (user request): hide the system navigation bar; a swipe
-  // from the edge shows it transiently. The status bar stays visible.
+  // [FORK:F002] 시작 — 하단 내비게이션 바를 항상 표시 (전체화면 해제)
+  // 원본: 내비게이션 바를 숨기고 가장자리 스와이프 때만 잠시 표시 (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
+  // 포크: 포커스를 얻을 때마다 내비게이션 바를 표시
+  // 이유: 숨김 상태에서는 위로 두 번 쓸어야 홈으로 나가져서 한 번의 제스처로 나가도록 함
+  // 원본 동일 수정 시: 원본 채택 — 원본도 내비게이션 바를 항상 보이게 바꾸면 이 블록 퇴역
   @Override
   public void onWindowFocusChanged(boolean hasFocus) {
     super.onWindowFocusChanged(hasFocus);
     if (!hasFocus) return;
     WindowInsetsControllerCompat controller =
         WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-    controller.setSystemBarsBehavior(
-        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-    controller.hide(WindowInsetsCompat.Type.navigationBars());
+    controller.show(WindowInsetsCompat.Type.navigationBars());
   }
+  // [FORK:F002] 끝
 }

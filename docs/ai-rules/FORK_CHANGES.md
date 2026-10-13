@@ -5,7 +5,7 @@ Upstream mobile baseline: **mobile-v0.1.13**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
-Next unused ID: **F002** (check all active and retired entries before allocation).
+Next unused ID: **F003** (check all active and retired entries before allocation).
 
 ## F001 — Fork update channel
 
@@ -28,6 +28,25 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogA
 - 2026-10-13: TypeScript marker completed with its condition (release links always target the fork).
 - No upstream retirement commit; identity remains active.
 
+## F002 — Navigation bar always visible
+
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java` (`onWindowFocusChanged`) |
+| Summary | Disable the immersive shell so a single swipe reaches Home |
+| Upstream behavior | Hides the navigation bar and shows it transiently on edge swipe (`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`) |
+| Fork behavior | Shows the navigation bar whenever the window gains focus |
+| Reason | With the bar hidden, leaving the app needed two upward swipes |
+| Default decision | **Adopt upstream** (`원본 채택`) if upstream also keeps the navigation bar visible; otherwise case b |
+| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+
+Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java:140`.
+
+### History
+
+- 2026-10-13: introduced for fork build `0.1.13.002`.
+
 ## Fork-owned files (no markers required)
 
 These are additions owned by the fork, not modifications to upstream product code.
@@ -47,10 +66,11 @@ New rule/audit files under these owned paths extend this section's ownership wit
 
 ## Fork build history
 
-| Upstream mobile | n | versionName | versionCode | Date | Source SHA | Outcome | Release tag |
+| Upstream mobile | NNN | versionName | versionCode | Date | Source | Outcome | Release tag |
 |---|---|---|---|---|---|---|---|
-| `mobile-v0.1.13` | 1 | `0.1.13.1` | `101301` | 2026-10-13 | `765857f75` | published | `mobile-v0.1.13.1` |
+| `mobile-v0.1.13` | 1 (pre-padding) | `0.1.13.1` | `101301` | 2026-10-13 | `765857f75` | published | `mobile-v0.1.13.1` |
+| `mobile-v0.1.13` | 002 | `0.1.13.002` | `101302` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.002` |
 
-On each authorized fork build append: upstream mobile version/tag, counter `n`, versionName, versionCode, build date, source SHA, outcome and release tag (if published).
-Reserve/increment counters for builds even when publication fails; never reuse a counter already assigned to a fork build.
-Use [tasks/RELEASE_APK.md](tasks/RELEASE_APK.md) to reset the counter after an upstream mobile version change and enforce increasing versionCode.
+On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
+Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.
+`NNN` resets to `001` after an upstream mobile version change; versionCode never resets (previous + 1). See [tasks/RELEASE_APK.md](tasks/RELEASE_APK.md).
