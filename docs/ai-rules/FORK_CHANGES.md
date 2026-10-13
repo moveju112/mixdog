@@ -5,7 +5,8 @@ Upstream mobile baseline: **mobile-v0.1.13**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
-Next unused ID: **F007** (check all active and retired entries before allocation).
+Next unused ID: **F008** (check all active and retired entries before allocation).
+Every entry's baseline upstream commit is `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) unless its table says otherwise.
 
 ## F001 — Fork update channel
 
@@ -18,9 +19,7 @@ Next unused ID: **F007** (check all active and retired entries before allocation
 | Fork behavior | API: `https://api.github.com/repos/moveju112/mixdog/releases?per_page=20`; download prefix: `https://github.com/moveju112/mixdog/releases/download/`; fallback: `https://github.com/moveju112/mixdog/releases` |
 | Reason | The fork APK has its own signing key and must never update from the original repository or lose fork customization |
 | Default decision | **Fork keeps** (`포크 유지`); identity case d, reapply alongside upstream security fixes |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
-
-Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:60`, `evidence: apps/mobile/src/main.ts:61`.
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:60`, `evidence: apps/mobile/src/main.ts:61` |
 
 ### History
 
@@ -39,11 +38,8 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogA
 | Fork behavior | Shows the navigation bar whenever the window gains focus |
 | Reason | With the bar hidden, leaving the app needed two upward swipes |
 | Default decision | **Adopt upstream** (`원본 채택`) if upstream also keeps the navigation bar visible; otherwise case b |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
-
-Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java:140`.
-
-History: 2026-10-13 introduced for fork build `0.1.13.002`.
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java:140` |
+| History | 2026-10-13 introduced for fork build `0.1.13.002` |
 
 ## F003 — Wider phone session drawer
 
@@ -57,11 +53,8 @@ History: 2026-10-13 introduced for fork build `0.1.13.002`.
 | Reason | More room for session titles without forking the PC app (the phone page is served by the PC) |
 | Default decision | **Merge** (`병합`): adopt upstream if it widens the drawer; if the variable or selector is renamed, reapply with the new name |
 | Coupling | Depends on upstream CSS names `--mx-side-sheet-width` and `data-mixdog-mobile-tabs`; on every sync, grep both in `apps/desktop/src/renderer/desktop/` — a rename silently disables the override |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
-
-Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:83`.
-
-History: 2026-10-13 introduced for fork build `0.1.13.003`.
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:83` |
+| History | 2026-10-13 introduced for fork build `0.1.13.003` |
 
 ## F004 — Launch straight into the saved PC
 
@@ -74,11 +67,8 @@ History: 2026-10-13 introduced for fork build `0.1.13.003`.
 | Fork behavior | Saved host and no `?manage` → launching note → `openHost(book.last)`; connection checks and the update banner are left to the relay web app (`AppUpdateBanner`) |
 | Reason | The QR screen flashed on every launch |
 | Default decision | **Adopt upstream** (`원본 채택`) if upstream also skips the pairing screen for saved hosts |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
-
-Evidence: `evidence: apps/mobile/src/main.ts:414`, `evidence: apps/mobile/src/main.ts:103`.
-
-History: 2026-10-13 introduced for fork build `0.1.13.003`.
+| Evidence | `evidence: apps/mobile/src/main.ts:414`, `evidence: apps/mobile/src/main.ts:103` |
+| History | 2026-10-13 introduced for fork build `0.1.13.003` |
 
 ## F005 — Update lookup on every app launch
 
@@ -91,11 +81,8 @@ History: 2026-10-13 introduced for fork build `0.1.13.003`.
 | Fork behavior | One lookup per process start, then the upstream interval; resuming from background does not force a lookup |
 | Reason | New fork releases stayed invisible for up to 6 hours after restarting the app |
 | Default decision | **Adopt upstream** (`원본 채택`) if upstream adds a launch-time lookup |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
-
-Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:79`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:194`.
-
-History: 2026-10-13 introduced for fork build `0.1.13.003`.
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:79`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:194` |
+| History | 2026-10-13 introduced for fork build `0.1.13.003` |
 
 ## F006 — Web links open in the system browser on the phone
 
@@ -109,11 +96,23 @@ History: 2026-10-13 introduced for fork build `0.1.13.003`.
 | Reason | Browser Use is not wanted on the phone |
 | Default decision | **Merge** (`병합`): adopt upstream if the phone default becomes the system browser; reapply if link DOM changes |
 | Coupling | Depends on chat web links being `a[href]` with the target URL (`apps/desktop/src/renderer/MarkdownLink.tsx`) and on `data-mixdog-mobile-tabs`; check both on every sync |
-| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:93`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:310` |
+| History | 2026-10-13 introduced for fork build `0.1.13.004` |
 
-Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:93`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:273`.
+## F007 — Swipe right to open the phone session drawer
 
-History: 2026-10-13 introduced for fork build `0.1.13.004`.
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java` (`register`, `DRAWER_SWIPE_SCRIPT`) |
+| Summary | A document-start passive touch listener dispatches `mixdog:mobile-home` once when a single-finger drag moves right ≥60px and more than twice its vertical distance while the drawer is closed |
+| Upstream behavior | The phone session drawer opens only from the strip's home button (`apps/desktop/src/renderer/WorkspaceTabStrip.tsx` → `mixdog:mobile-home`, handled in `apps/desktop/src/renderer/app-shell-mobile-back.ts`) |
+| Fork behavior | Left-to-right drag anywhere on the phone screen opens the drawer with upstream's own animation and back handling; drags starting in inputs, xterm terminals, dialogs or horizontally scrollable elements, or with a text selection, are ignored; it never closes the drawer |
+| Reason | Open the session list quickly with one hand |
+| Default decision | **Adopt upstream** (`원본 채택`) if upstream adds swipe-to-open; reapply if the event name or drawer DOM changes |
+| Coupling | Depends on `mixdog:mobile-home` toggling the drawer, `.sidebar-drawer-frame[data-state]` (`apps/desktop/src/renderer/app-root/AppSidebarDrawer.tsx`) and `data-mixdog-mobile-tabs`; check all three on every sync |
+| Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:102`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:137` |
+| History | 2026-10-14 introduced for fork build `0.1.13.005` |
 
 ## Fork-owned files (no markers required)
 
@@ -140,6 +139,7 @@ New rule/audit files under these owned paths extend this section's ownership wit
 | `mobile-v0.1.13` | 002 | `0.1.13.002` | `101302` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.002` |
 | `mobile-v0.1.13` | 003 | `0.1.13.003` | `101303` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.003` |
 | `mobile-v0.1.13` | 004 | `0.1.13.004` | `101304` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.004` |
+| `mobile-v0.1.13` | 005 | `0.1.13.005` | `101305` | 2026-10-14 | release tag target | published | `mobile-v0.1.13.005` |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.
