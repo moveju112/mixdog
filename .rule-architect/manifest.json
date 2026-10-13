@@ -3,12 +3,12 @@
   "files": {
     ".rule-architect/decisions.json": {
       "type": "file",
-      "sha256": "b1bbd39fcf64f7d1ab11e33d99581bc2224011c9bd5815a97729c5ee7a370851",
+      "sha256": "30ed34da3c0213840670609130c948b6f98b15f39d96f15f90ab7df6e7adb550",
       "lines": 118
     },
     ".rule-architect/scan-current.json": {
       "type": "file",
-      "sha256": "3f96162a30dd2cf762eda390ea1ee2b081194999abcc48d45bf7ec640a39b395",
+      "sha256": "ec11f2d81aeba433c5cff76b0001ac5dc2ac3208fd885170ad8a4f510981cf54",
       "lines": 306
     },
     ".rule-architect/scan.json": {
@@ -46,8 +46,8 @@
     },
     "docs/ai-rules/FORK_CHANGES.md": {
       "type": "file",
-      "sha256": "acb29885e36c9442e226a0b3b8c363816279a93941b26478a9af0d0519c9c87f",
-      "lines": 77
+      "sha256": "e573b0053b06840b9ec774d8ad27a8084783a81f57364128eaf44071373d7211",
+      "lines": 136
     },
     "docs/ai-rules/FORK_RULES.md": {
       "type": "file",
@@ -66,7 +66,7 @@
     },
     "docs/ai-rules/tasks/SYNC_UPSTREAM.md": {
       "type": "file",
-      "sha256": "cfab698dcf739d126d913e402f53c6f3d6dbd4f3b36da197c12a1f5b666ed0ef",
+      "sha256": "2bdcc1d09d0287d017a0477ad97532e42752f13cedf556b3d6d3b2c63fd6f91c",
       "lines": 24
     }
   }
