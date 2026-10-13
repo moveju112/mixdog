@@ -7,7 +7,7 @@ Classifications and retirement are owned by [FORK_RULES.md](../FORK_RULES.md); s
    `evidence: apps/mobile/src/main.ts:61` (existing fork work must survive).
 2. From the root, run `git fetch upstream --tags`. Select `upstream/main` or an upstream release tag `vX.Y.Z`; record its resolved commit and inspect the proposed changes before merging.
    `evidence: package.json:3` (baseline release namespace).
-3. List blocks with `git grep -n "\[FORK:"`. For every active ledger entry, inspect upstream changes to its files with `git diff <last-sync>..upstream/main -- <files>`; when merging a release tag, use that tag instead of `upstream/main`. Initially `<last-sync>` is `ab53d8226`.
+3. List blocks with `git grep -n "\[FORK:"`. For every active ledger entry, inspect upstream changes to its files with `git diff <last-sync>..upstream/main -- <files>`; when merging a release tag, use that tag instead of `upstream/main`. Also run the check in each entry's `Coupling` row (e.g. F003's CSS names), since those upstream files are outside the entry's own file list. Initially `<last-sync>` is `ab53d8226`.
    `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:60`, `evidence: apps/mobile/src/main.ts:61`.
 4. Classify each touched intent as a–e under FORK_RULES. If any case c exists, show a decision table **before resolving anything**, including ID/files, upstream intent, fork intent, marker default, proposed result and approval status; wait for the user's decision. Identity stays fork; security fixes land before safe reapplication.
    `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:64` (F001 default).

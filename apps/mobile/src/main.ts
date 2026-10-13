@@ -100,6 +100,21 @@ function render(): void {
   );
 }
 
+// [FORK:F004] 시작 — 저장된 PC 로 이동하는 동안 보여줄 '연결 중…' 화면
+// 원본: 없음 (이 동안 QR 연결 화면이 표시됨)
+// 포크: 화면 가운데에 '연결 중…' 문구만 표시
+// 이유: 이력 있는 실행에서 QR 연결 화면이 잠깐 보이지 않도록 함
+// 원본 동일 수정 시: 원본 채택 — 원본 실행 화면이 생기면 이 함수 퇴역
+// 저장된 PC 진입 대기 화면 (연결 중 문구 -> 화면 중앙)
+function renderLaunching(): void {
+  const note = document.createElement('p');
+  note.className = 'mxp-wait';
+  note.style.cssText = 'margin:auto;place-self:center;color:var(--mxp-muted);font-family:var(--mxp-font)';
+  note.textContent = strings.connecting;
+  screen.replaceChildren(note);
+}
+// [FORK:F004] 끝
+
 function go(step: Step, extra: { result?: ResultKind; error?: string } = {}): void {
   ui = { ...ui, step, result: extra.result, error: extra.error ?? '', busy: false };
   render();
@@ -396,9 +411,24 @@ async function boot(): Promise<void> {
     return;
   }
   await loadBook();
-  render();
+  // [FORK:F004] 시작 — 접속 이력이 있으면 QR 연결 화면 없이 바로 PC 화면으로 진입
+  // 원본: 연결 화면을 먼저 그리고 업데이트 상태 확인까지 끝낸 뒤 저장된 PC 로 이동 (업데이트 알림이 있으면 연결 화면에 머묾)
+  // 포크: 이력이 있으면 '연결 중…' 만 표시하고 접속 허용 목록 동기화 직후 이동, 접속 검사·업데이트 배너는 PC 화면(relay 웹앱)이 담당
+  // 이유: 앱을 켤 때마다 QR 연결 화면이 먼저 보여 진입이 매끄럽지 않음
+  // 원본 동일 수정 시: 원본 채택 — 원본도 이력 있는 실행에서 연결 화면을 건너뛰면 이 블록 퇴역
+  const lastHost = book.last;
+  const resume = !manage && extractPairingLink(lastHost) !== null;
+  if (resume) renderLaunching();
+  else render();
   await syncOrigins();
   void App.addListener('appUrlOpen', ({ url }) => void connectFrom(linkFromAppUrl(url)));
+  if (resume) {
+    launching = true;
+    await openHost(lastHost);
+    launching = false;
+    return;
+  }
+  // [FORK:F004] 끝
 
   // Only Android sideloads: iOS updates arrive through TestFlight. The native
   // side owns the release lookup; the launch only reads its cached state (a

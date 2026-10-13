@@ -76,6 +76,13 @@ final class MixdogAppUpdater {
   // One release lookup per process, whichever updater instance (activity
   // recreation) asked; its result goes to the newest instance.
   private static final AtomicBoolean LOOKUP_RUNNING = new AtomicBoolean(false);
+  // [FORK:F005] 시작 — 앱을 새로 켤 때(프로세스 시작)마다 릴리스 조회
+  // 원본: 마지막 조회 후 6시간(CHECK_INTERVAL_MS)이 지나야 조회, 재실행해도 간격 유지
+  // 포크: 프로세스 첫 상태 요청에서 간격과 무관하게 한 번 조회, 이후는 원본 간격 유지
+  // 이유: 앱을 껐다 켜도 새 릴리스가 6시간 동안 보이지 않음
+  // 원본 동일 수정 시: 원본 채택 — 원본도 실행 시 조회를 넣으면 이 블록 퇴역
+  private static final AtomicBoolean LAUNCH_LOOKUP_DONE = new AtomicBoolean(false);
+  // [FORK:F005] 끝
   private static volatile MixdogAppUpdater active = null;
 
   private static final ScheduledExecutorService WORK =
@@ -184,7 +191,14 @@ final class MixdogAppUpdater {
             || "checking".equals(status);
     long now = System.currentTimeMillis();
     long last = prefs().getLong(LAST_CHECK, 0);
-    if (idle && (check || now < last || now - last >= CHECK_INTERVAL_MS)) beginLookup(check);
+    // [FORK:F005] 시작 — 프로세스 첫 요청이면 간격 무시하고 조회
+    // 원본: if (idle && (check || now < last || now - last >= CHECK_INTERVAL_MS)) beginLookup(check);
+    // 포크: 위 조건에 프로세스 첫 조회 여부(LAUNCH_LOOKUP_DONE)를 추가
+    // 이유: 재실행 시 바로 새 릴리스를 찾기 위함
+    // 원본 동일 수정 시: 원본 채택 — 원본도 실행 시 조회를 넣으면 이 블록 퇴역
+    boolean launch = idle && LAUNCH_LOOKUP_DONE.compareAndSet(false, true);
+    if (idle && (check || launch || now < last || now - last >= CHECK_INTERVAL_MS)) beginLookup(check);
+    // [FORK:F005] 끝
     return state();
   }
 

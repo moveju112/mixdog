@@ -5,7 +5,7 @@ Upstream mobile baseline: **mobile-v0.1.13**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
-Next unused ID: **F003** (check all active and retired entries before allocation).
+Next unused ID: **F006** (check all active and retired entries before allocation).
 
 ## F001 — Fork update channel
 
@@ -47,6 +47,64 @@ Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainAct
 
 - 2026-10-13: introduced for fork build `0.1.13.002`.
 
+## F003 — Wider phone session drawer
+
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java` (`register`, `DRAWER_WIDTH_SCRIPT`) |
+| Summary | Inject a document-start style that sets the portrait drawer width to `89vw`, halving the empty band on the right |
+| Upstream behavior | The relay web app sizes the drawer with `--mx-side-sheet-width` (78% of the screen) in `apps/desktop/src/renderer/desktop/07-mobile-chrome.css` |
+| Fork behavior | `html[data-mixdog-mobile-tabs]{--mx-side-sheet-width:89vw !important}` in portrait; landscape stays upstream |
+| Reason | More room for session titles without forking the PC app (the phone page is served by the PC) |
+| Default decision | **Merge** (`병합`): adopt upstream if it widens the drawer; if the variable or selector is renamed, reapply with the new name |
+| Coupling | Depends on upstream CSS names `--mx-side-sheet-width` and `data-mixdog-mobile-tabs`; on every sync, grep both in `apps/desktop/src/renderer/desktop/` — a rename silently disables the override |
+| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+
+Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:83`.
+
+### History
+
+- 2026-10-13: introduced for fork build `0.1.13.003`.
+
+## F004 — Launch straight into the saved PC
+
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/src/main.ts` (`boot`, `renderLaunching`) |
+| Summary | With a saved host, show only "연결 중…" and navigate right after `syncOrigins`; the QR/pairing screen is skipped |
+| Upstream behavior | Renders the pairing screen first, reads the cached update state, then opens the saved host; a pending update offer keeps the pairing screen |
+| Fork behavior | Saved host and no `?manage` → launching note → `openHost(book.last)`; connection checks and the update banner are left to the relay web app (`AppUpdateBanner`) |
+| Reason | The QR screen flashed on every launch |
+| Default decision | **Adopt upstream** (`원본 채택`) if upstream also skips the pairing screen for saved hosts |
+| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+
+Evidence: `evidence: apps/mobile/src/main.ts:414`, `evidence: apps/mobile/src/main.ts:103`.
+
+### History
+
+- 2026-10-13: introduced for fork build `0.1.13.003`.
+
+## F005 — Update lookup on every app launch
+
+| Field | Value |
+|---|---|
+| Status | active |
+| Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java` (`LAUNCH_LOOKUP_DONE`, `get`) |
+| Summary | The first update-state request of each process looks up releases regardless of the 6-hour interval |
+| Upstream behavior | Looks up only when 6 hours (`CHECK_INTERVAL_MS`) passed since the last lookup, even across restarts |
+| Fork behavior | One lookup per process start, then the upstream interval; resuming from background does not force a lookup |
+| Reason | New fork releases stayed invisible for up to 6 hours after restarting the app |
+| Default decision | **Adopt upstream** (`원본 채택`) if upstream adds a launch-time lookup |
+| Baseline upstream commit | `ab53d8226` (`v1.2.0`, upstream mobile `0.1.13`) |
+
+Evidence: `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:79`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:194`.
+
+### History
+
+- 2026-10-13: introduced for fork build `0.1.13.003`.
+
 ## Fork-owned files (no markers required)
 
 These are additions owned by the fork, not modifications to upstream product code.
@@ -70,6 +128,7 @@ New rule/audit files under these owned paths extend this section's ownership wit
 |---|---|---|---|---|---|---|---|
 | `mobile-v0.1.13` | 1 (pre-padding) | `0.1.13.1` | `101301` | 2026-10-13 | `765857f75` | published | `mobile-v0.1.13.1` |
 | `mobile-v0.1.13` | 002 | `0.1.13.002` | `101302` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.002` |
+| `mobile-v0.1.13` | 003 | `0.1.13.003` | `101303` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.003` |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.

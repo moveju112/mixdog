@@ -80,7 +80,27 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
   void register(WebView webView) {
     if (webView == null || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
     WebViewCompat.addWebMessageListener(webView, NAME, Collections.singleton("*"), this);
+    // [FORK:F003] 시작 — 폰 세션 서랍을 넓혀 오른쪽 빈 공간을 절반으로 줄임
+    // 원본: relay 웹앱 CSS(apps/desktop/.../07-mobile-chrome.css)의 --mx-side-sheet-width = 화면의 78%
+    // 포크: 세로 화면에서 --mx-side-sheet-width 를 89vw 로 덮어쓰는 스타일을 문서 시작 시 주입 (가로 화면은 원본 유지)
+    // 이유: 서랍 오른쪽 빈 공간이 넓어 세션 제목 글자 공간이 좁음, PC 앱 포크 없이 폰 앱에서만 바꾸기 위함
+    // 원본 동일 수정 시: 병합 — 원본이 서랍 폭을 넓히면 원본 채택, 변수명이 바뀌면 새 변수명으로 다시 적용
+    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+      WebViewCompat.addDocumentStartJavaScript(webView, DRAWER_WIDTH_SCRIPT, Collections.singleton("*"));
+    }
+    // [FORK:F003] 끝
   }
+
+  // [FORK:F003] 시작 — 서랍 폭 덮어쓰기 스타일 (html[data-mixdog-mobile-tabs] 는 relay 웹앱의 폰 화면에만 존재)
+  // 원본: 없음
+  // 포크: 세로 화면 서랍 폭 89vw
+  // 이유: 위 register() 의 F003 블록과 동일
+  // 원본 동일 수정 시: 병합 — 위 F003 블록과 함께 판단
+  private static final String DRAWER_WIDTH_SCRIPT =
+      "(function(){var s=document.createElement('style');"
+          + "s.textContent='@media (orientation: portrait){html[data-mixdog-mobile-tabs]{--mx-side-sheet-width:89vw !important}}';"
+          + "(document.head||document.documentElement).appendChild(s);})();";
+  // [FORK:F003] 끝
 
   @Override
   public void onPostMessage(
