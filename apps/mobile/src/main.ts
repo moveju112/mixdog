@@ -58,7 +58,13 @@ type UpdateCall = (method: string, args?: unknown) => Promise<unknown>;
 /** Statuses the pairing screen offers an update for. */
 const OFFERABLE_STATUSES = new Set(['available', 'downloading', 'ready', 'needs-permission', 'installing', 'failed']);
 /** Fallback when the in-app update cannot run and the native side has no URL. */
-const RELEASES_URL = 'https://github.com/tribgames/mixdog/releases';
+// [FORK:F001] 시작 — 업데이트 대체 링크를 포크 저장소 릴리스 페이지로 변경
+// 원본: https://github.com/tribgames/mixdog/releases
+// 포크: https://github.com/moveju112/mixdog/releases
+// 이유: 네이티브 업데이터(MixdogAppUpdater.java)와 같은 포크 릴리스를 안내해야 함
+// 원본 동일 수정 시: 포크 유지
+const RELEASES_URL = 'https://github.com/moveju112/mixdog/releases';
+// [FORK:F001] 끝
 
 async function updateBridge(method: string, args?: unknown): Promise<unknown> {
   const info = nativeAppInfo() as unknown as { call?: UpdateCall } | null;

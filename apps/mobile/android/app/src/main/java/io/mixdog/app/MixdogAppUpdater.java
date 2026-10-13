@@ -57,8 +57,14 @@ final class MixdogAppUpdater {
   private static final String DOWNLOAD_ID = "download_id";
   private static final String DISMISSED = "dismissed_version";
 
-  private static final String RELEASES_API = "https://api.github.com/repos/tribgames/mixdog/releases?per_page=20";
-  private static final String DOWNLOAD_PREFIX = "https://github.com/tribgames/mixdog/releases/download/";
+  // [FORK:F001] 시작 — 자동업데이트가 포크 저장소 릴리스를 조회
+  // 원본: tribgames/mixdog 의 mobile-v* 릴리스 조회
+  // 포크: moveju112/mixdog 의 mobile-v* 릴리스 조회 (포크 서명키로 빌드한 APK)
+  // 이유: 포크 APK 는 서명이 달라 원본 릴리스로 업데이트 불가, 원본 APK 로 덮이면 포크 수정 유실
+  // 원본 동일 수정 시: 포크 유지 — 주소 상수는 항상 포크 저장소를 가리켜야 함
+  private static final String RELEASES_API = "https://api.github.com/repos/moveju112/mixdog/releases?per_page=20";
+  private static final String DOWNLOAD_PREFIX = "https://github.com/moveju112/mixdog/releases/download/";
+  // [FORK:F001] 끝
   private static final String TAG_PREFIX = "mobile-v";
   private static final String APK_MIME = "application/vnd.android.package-archive";
   private static final String UPDATES_DIR = "updates";
