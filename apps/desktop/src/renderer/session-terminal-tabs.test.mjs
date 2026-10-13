@@ -37,16 +37,30 @@ test('tabs use the fixed id contract and never reuse a number', () => {
   assert.deepEqual(releaseSessionTerminalTabs(sid), [first, third.id, `${first}:4`]);
 });
 
-test('closing the last tab leaves one fresh default tab', () => {
+test('closing the last tab leaves no tabs until explicitly reopened', () => {
   const sid = 'tabs-last';
   const first = sessionTerminalId(sid);
   assert.equal(closeSessionTerminalTab(sid, first), first);
   const { tabs, activeId } = getSessionTerminalTabs(sid);
-  assert.equal(tabs.length, 1);
-  assert.equal(tabs[0].shell, '');
-  assert.equal(tabs[0].id, `${first}:2`);
-  assert.equal(activeId, tabs[0].id);
+  assert.equal(tabs.length, 0);
+  assert.equal(activeId, '');
   assert.equal(closeSessionTerminalTab(sid, 'unknown'), null);
+  const reopened = openSessionTerminalTab(sid);
+  assert.equal(reopened.id, `${first}:2`);
+  assert.equal(reopened.shell, '');
+  assert.equal(activeSessionTerminalId(sid), reopened.id);
+  releaseSessionTerminalTabs(sid);
+});
+
+test('command requests reopen a closed terminal and deliver to the new tab', () => {
+  const sid = 'tabs-reopen-command';
+  closeSessionTerminalTab(sid, sessionTerminalId(sid));
+  requestTerminalCommand(sid, 'pwd');
+  const terminalId = activeSessionTerminalId(sid);
+  assert.equal(terminalId, `${sessionTerminalId(sid)}:2`);
+  const input = collect(terminalId);
+  assert.deepEqual(input.entered, ['pwd\r']);
+  input.stop();
   releaseSessionTerminalTabs(sid);
 });
 
