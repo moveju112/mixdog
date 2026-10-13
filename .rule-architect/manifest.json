@@ -3,12 +3,12 @@
   "files": {
     ".rule-architect/decisions.json": {
       "type": "file",
-      "sha256": "30ed34da3c0213840670609130c948b6f98b15f39d96f15f90ab7df6e7adb550",
+      "sha256": "814d608e30dcdb7a3178ff6e5477f32f9fcdb4c784a19633e05ce1f6ceb92b12",
       "lines": 118
     },
     ".rule-architect/scan-current.json": {
       "type": "file",
-      "sha256": "ec11f2d81aeba433c5cff76b0001ac5dc2ac3208fd885170ad8a4f510981cf54",
+      "sha256": "f05b83907cc390a52bfd480ebdd3872c235a5c59a5bd355d535bd41bf60c49cb",
       "lines": 306
     },
     ".rule-architect/scan.json": {
@@ -46,8 +46,8 @@
     },
     "docs/ai-rules/FORK_CHANGES.md": {
       "type": "file",
-      "sha256": "e573b0053b06840b9ec774d8ad27a8084783a81f57364128eaf44071373d7211",
-      "lines": 136
+      "sha256": "ae4510d5dcc66de0e53008e8087d275ab6c58d822477eccb51513aae07796485",
+      "lines": 147
     },
     "docs/ai-rules/FORK_RULES.md": {
       "type": "file",

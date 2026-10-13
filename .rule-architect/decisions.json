@@ -2,7 +2,7 @@
   "schema": "rule-architect/decisions@1",
   "root": "/home/ubuntu/project/mixdog",
   "scanSchema": "rule-architect/scan@3",
-  "gitHead": "355c9a6739c51ed4028c03241d37cbbcc5b39892",
+  "gitHead": "3bf2888fce351a51798b633e4fd40e81847b261e",
   "truncated": {
     "bytes": false,
     "commits": true,
@@ -98,7 +98,7 @@
       "reason": "The observed repeated pairs are upstream root/desktop/relay release bookkeeping, not an authorized fork implementation task. Preserve these through merge rather than generating an ADD task. The explicitly requested SYNC_UPSTREAM and RELEASE_APK playbooks cover this fork's tasks. The 500-commit history cap limits coverage but does not negate the positive observed pairs."
     }
   ],
-  "sourceFingerprint": "30bd1b93e0d989ed94fd60f08be7bb45e453d30cf755272a342d53f74bd3ee54",
+  "sourceFingerprint": "d3ca1d435d7e1982ae1c7e82f11cb53de415f9235e16eed4f09e04068c34db50",
   "scanLimits": {
     "maxBytes": 209715200,
     "maxCommits": 500,
