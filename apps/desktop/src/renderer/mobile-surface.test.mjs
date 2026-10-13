@@ -44,6 +44,30 @@ test('phone draft context keeps Project and its height while Workflow loads', ()
   }
 });
 
+// 모바일 채팅 여백 축소 (채팅 inset 변경 -> 입력창과 데스크톱 유지).
+test('phone chat removes its extra text inset without changing composer or desktop insets', () => {
+  const transcriptSource = readFileSync(new URL('./desktop/12-transcript.css', import.meta.url), 'utf8');
+  for (const mobile of [false, true]) {
+    const dom = new JSDOM(`<!doctype html><html${mobile ? ' data-mixdog-mobile-tabs' : ''}><head>
+      <style>${transcriptSource}\n${mobileChromeSource}</style></head><body>
+      <div class="conversation"><div class="transcript"></div></div>
+      <div class="studio-shell"></div></body></html>`);
+    try {
+      for (const selector of ['.conversation', '.studio-shell']) {
+        const style = dom.window.getComputedStyle(dom.window.document.querySelector(selector));
+        assert.equal(style.getPropertyValue('--transcript-text-inset').trim(),
+          mobile ? '0px' : 'var(--composer-text-inset)');
+        assert.equal(style.getPropertyValue('--composer-text-inset').trim(),
+          mobile ? 'var(--mx-mobile-edge-main)' : '16px');
+        assert.equal(style.getPropertyValue('--pane-inset').trim(),
+          mobile ? 'var(--mx-mobile-edge-main)' : '20px');
+      }
+    } finally {
+      dom.window.close();
+    }
+  }
+});
+
 test('first-paint theme uses the same dark default and explicit System preference as App', async () => {
   for (const osLight of [false, true]) {
     for (const [preference, light, storageBlocked = false] of [

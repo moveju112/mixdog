@@ -1017,14 +1017,13 @@ html[data-mixdog-mobile-tabs] {
 }
 
 /* ── Phone finishing pass ──────────────────────────────────────────────────
-   Reading and typing use one 24dp text edge: 12dp pane inset + 12dp content
-   inset. The previous phone exception kept transcript text 4px wider than the
-   composer and made the two columns visibly drift on 390/412px screens. */
+   Chat uses a 12dp text edge, half the previous 24dp edge. Typing keeps its
+   24dp text edge: 12dp pane inset + 12dp content inset. */
 html[data-mixdog-mobile-tabs] :is(.conversation, .studio-shell) {
   --pane-inset: var(--mx-mobile-edge-main);
   --pane-chrome-inset: var(--mx-mobile-floor-main);
   --composer-text-inset: var(--mx-mobile-edge-main);
-  --transcript-text-inset: var(--mx-mobile-edge-main);
+  --transcript-text-inset: 0px;
 }
 html[data-mixdog-mobile-tabs] .composer-region {
   padding-bottom: max(var(--mx-mobile-floor-main), env(safe-area-inset-bottom, 0px));
