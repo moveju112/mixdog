@@ -70,4 +70,4 @@ If a safe reapplication is unclear or other intent conflicts, use case c instead
 3. Mark the ledger ID `retired`, retain its original files/intent/baseline/default, append the retirement date and upstream commit to history. Never delete the ledger entry or reuse the ID.
 4. Run the affected mobile checks and record the sync result using [tasks/SYNC_UPSTREAM.md](tasks/SYNC_UPSTREAM.md).
 
-Publishing and Git mutations still need task-scoped user authorization; a playbook documents procedure, not blanket permission to push or release.
+Publishing and Git mutations need task-scoped user authorization or the phone-app-update standing authorization in [AI_RULES.md](../../AI_RULES.md). That standing scope includes task-only commit, `origin/main` push and verified APK publication, not unrelated or destructive operations; explicit narrower requests override it.

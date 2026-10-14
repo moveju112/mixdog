@@ -131,6 +131,8 @@ These are additions owned by the fork, not modifications to upstream product cod
 Ownership history: initial English v2 rule generation; shared symlink entry mode.
 New rule/audit files under these owned paths extend this section's ownership without product markers.
 
+- 2026-10-14: user authorized the standard phone-app-update pipeline in `AI_RULES.md`: version bump, checks, existing-key signing, task-only staging/commit, `origin/main` push and verified published APK release without repeated approval. Completion requires the user's installed-version confirmation; explicit narrower requests and safety exclusions remain effective.
+
 ## Fork build history
 
 | Upstream mobile | NNN | versionName | versionCode | Date | Source | Outcome | Release tag |
@@ -140,13 +142,14 @@ New rule/audit files under these owned paths extend this section's ownership wit
 | `mobile-v0.1.13` | 003 | `0.1.13.003` | `101303` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.003` |
 | `mobile-v0.1.13` | 004 | `0.1.13.004` | `101304` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.004` |
 | `mobile-v0.1.13` | 005 | `0.1.13.005` | `101305` | 2026-10-14 | release tag target | published | `mobile-v0.1.13.005` |
-| `mobile-v0.1.14` | 001 | `0.1.14.001` | `101306` | 2026-10-14 | `18cd3323d` + upstream `c088221d889a9ca2d8a3366b878df97604de5f5e` (uncommitted merge) | built locally; mobile checks, signature, version and ZIP integrity verified | — |
+| `mobile-v0.1.14` | 001 | `0.1.14.001` | `101306` | 2026-10-14 | `e0d8e2be4323c57938688d4334a6c85d7825e78d` | published; mobile checks, signature, version, ZIP integrity and public download verified; phone installation awaits user confirmation | `mobile-v0.1.14.001` |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.
 
 ## Upstream sync history
 
-- 2026-10-14: integrated `upstream/main` at `c088221d889a9ca2d8a3366b878df97604de5f5e`. F002 retired under case a at upstream `ed5c9248ce0aeca653974d508cc7434fefc947a6`; F001 and F003–F007 remain active. Git merge commit and push to `origin/main` authorized; APK publication awaits separate approval.
+- 2026-10-14: integrated `upstream/main` at `c088221d889a9ca2d8a3366b878df97604de5f5e`. F002 retired under case a at upstream `ed5c9248ce0aeca653974d508cc7434fefc947a6`; F001 and F003–F007 remain active. Merge commit `e0d8e2be4323c57938688d4334a6c85d7825e78d` pushed to `origin/main`; release `mobile-v0.1.14.001` published at that source commit, phone installation awaiting user confirmation.
 - 2026-10-14: `npm run check` (27 tests), `npm run test:java` and signed release build passed with JDK 21. F003/F006/F007 coupling names and event/DOM contracts remain compatible. APK `0.1.14.001` / `101306` saved to `/home/ubuntu/project/mixdog-fork-dist/Mixdog-0.1.14.001.apk`; certificate matches the previous fork APK. SHA-256: `9993e04ada50dc6204321600aac688946959d846ee5629641eeff4eba35a87d9`. Signature verification reports the same unsigned META-INF metadata warning class as the previous APK; device installation and runtime testing were not performed.
+- 2026-10-14: public non-draft, non-prerelease release and its tag target verified. Anonymous download from `https://github.com/moveju112/mixdog/releases/download/mobile-v0.1.14.001/Mixdog-0.1.14.001.apk` matched the verified local APK's 26132737 bytes and SHA-256.
 `NNN` resets to `001` after an upstream mobile version change; versionCode never resets (previous + 1). See [tasks/RELEASE_APK.md](tasks/RELEASE_APK.md).

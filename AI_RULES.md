@@ -8,8 +8,18 @@ Android/mobile-focused fork of `tribgames/mixdog`; the full upstream tree is ret
 - Every fork change has a [ledger entry](docs/ai-rules/FORK_CHANGES.md); fork-owned rule/audit files need no code markers.
 - Upstream updates use the merge-only [SYNC_UPSTREAM](docs/ai-rules/tasks/SYNC_UPSTREAM.md) procedure; preserve uncommitted work first.
 - Conflicts follow [FORK_RULES](docs/ai-rules/FORK_RULES.md) priorities; case c waits for user approval, identity stays fork, security fixes land.
-- APK versioning, signing and publication follow [RELEASE_APK](docs/ai-rules/tasks/RELEASE_APK.md); push only to the fork with explicit task authorization.
+- APK versioning, signing and publication follow [RELEASE_APK](docs/ai-rules/tasks/RELEASE_APK.md) and the standing authorization below; push only to the fork.
 - Preserve shared native/web authorization and pairing order under [CODING_RULES](docs/ai-rules/CODING_RULES.md).
+
+## Standing authorization — phone app updates
+
+The user approved this scope on 2026-10-14 for `/home/ubuntu/project/mixdog` and `moveju112/mixdog`.
+
+- For requested fork app changes, upstream updates or APK builds, the default goal is updating the app on the user's phone, not stopping at a local build or source push.
+- Complete the standard pipeline without repeated approval: preserve fork intent → bump fork versionName and versionCode → checks and existing-key signing → stage only task changes → commit → `git push origin main` → publish a non-draft, non-prerelease GitHub Release with the verified APK targeting the pushed source commit → verify the download and provide its link.
+- Finish the phone-update goal only after the user confirms the installed version. Until then, report publication as complete and device installation as unverified.
+- Explicitly narrower requests (read-only, local-only, no commit/push/publication) override this default. Case c conflict decisions still require approval.
+- This scope never authorizes upstream pushes, force/history rewriting, unrelated changes, workflow/Firebase configuration, signing-key replacement, server/DB deployment, destructive actions or device installation/control.
 
 ## Run commands
 

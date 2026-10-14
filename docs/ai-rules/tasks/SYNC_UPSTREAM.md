@@ -1,6 +1,6 @@
 # Sync Upstream
 
-Use only with authorization for the named merge; this procedure does not authorize an unrelated commit, push, release or destructive operation.
+Use only with authorization for the named merge. Standard phone-app updates include the commit/push and APK publication scope approved in [AI_RULES.md](../../../AI_RULES.md); explicit local-only requests override it. This procedure never authorizes unrelated or destructive operations.
 Classifications and retirement are owned by [FORK_RULES.md](../FORK_RULES.md); state is in [FORK_CHANGES.md](../FORK_CHANGES.md).
 
 1. Inspect `git status --short` and the current branch. Before merging, commit or branch away uncommitted work with user authorization; do not erase it or merge onto a dirty `main`. Confirm `origin` is `moveju112/mixdog` and `upstream` is `tribgames/mixdog` (fetch only).
@@ -17,7 +17,7 @@ Classifications and retirement are owned by [FORK_RULES.md](../FORK_RULES.md); s
    `evidence: apps/mobile/package.json:13`, `evidence: apps/mobile/package.json:11`.
 7. Update the ledger's last-sync line with the actual merged upstream ref and full commit; update active/retired statuses and append history. Retire redundant non-identity blocks only through FORK_RULES, including the upstream implementing commit. Resolve the merged upstream mobile tag using RELEASE_APK's three-part filter; if its version changed, the next fork build resets `NNN` to `001` while versionCode continues at previous + 1.
    `evidence: apps/mobile/android/app/build.gradle:12`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:665`.
-8. Complete any conflict merge and ledger commit only within the approved Git scope. If pushing is authorized, use only `git push origin main`; never push to upstream, never push upstream tags, never `--tags`, never force. Otherwise report the local merge and leave it unpushed.
+8. Complete any conflict merge and ledger commit within task-scoped or standing authorization. For standard phone-app updates, continue through `git push origin main` and the signed APK publication/download checks in RELEASE_APK without repeated approval; obtain the user's installed-version confirmation before declaring the phone-update goal complete. Never push to upstream, never push upstream tags, never `--tags`, never force. With an explicitly narrower scope, report the local result and do not exceed it.
    `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogAppUpdater.java:65` (fork repository identity).
 
 Decision table columns: `ID / files | upstream change | fork intent | case | marker default | proposed resolution | user approval`.
