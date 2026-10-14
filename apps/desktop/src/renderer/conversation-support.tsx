@@ -21,6 +21,7 @@ import { TranscriptAssistantRow, type TranscriptAssistantRowProps } from './Tran
 import { submissionIdentity, transcriptRowArchived, turnPromptText, type TranscriptRowModel } from './transcript-rows';
 import { TranscriptRow } from './transcript-row';
 import { backgroundWorkCounts, completionActivityKey, hadLiveActivity, LiveActivity } from './transcript-status';
+import { dropTranscriptScrollDeviation } from './transcript-follow-rules';
 import { ToolActivityGroup } from './transcript-tool-ui';
 import { TurnChangesCard } from './TurnChangesCard';
 import { desktopPromptDisplayText, pendingPromptImages, type PendingPromptItem } from './conversation-prompt-items';
@@ -282,6 +283,9 @@ export function conversationKeyDownCapture(
         const direction = event.key === 'PageDown' ? 1 : -1;
         element.scrollBy({ top: Math.round(element.clientHeight * 0.9) * direction, behavior: 'auto' });
       } else {
+        // An absolute target is logical: a row offset the timeline still
+        // holds from a touch scroll ends with this write.
+        dropTranscriptScrollDeviation(element);
         element.scrollTo({ top: event.key === 'Home' ? 0 : element.scrollHeight, behavior: 'auto' });
       }
     }
@@ -417,16 +421,15 @@ export function transcriptRowNode(
     !snapshot.busy &&
     Boolean(latestCompletion) &&
     (row.completion === latestCompletion || row.item === latestCompletion);
+  const sessionId = String(snapshot.sessionId || '').trim();
+  const turnIdentity = submissionIdentity(row.turnKey);
   const assistantProps: TranscriptAssistantRowProps = {
     item: row.item,
     live: Boolean(row.live),
     completion: row.completion,
     backgroundWork: isLatestCompletion ? backgroundWorkCounts(snapshot) : undefined,
-    animateComplete: hadLiveActivity(String(snapshot.sessionId || '').trim(), submissionIdentity(row.turnKey)),
-    completionActivityKey: completionActivityKey(
-      String(snapshot.sessionId || '').trim(),
-      submissionIdentity(row.turnKey)
-    ),
+    animateComplete: hadLiveActivity(sessionId, turnIdentity),
+    completionActivityKey: completionActivityKey(sessionId, turnIdentity),
     disclosureScope,
   };
   const assistant = renderAssistantRow ? (

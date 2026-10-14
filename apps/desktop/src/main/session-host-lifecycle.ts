@@ -454,7 +454,14 @@ export class SessionHostLifecycle {
    *  reserved session, before its first submission. */
   private async configureDraft(sessionId: string, draft: DesktopNewTaskDraft): Promise<void> {
     if (draft.workflowId) {
-      await this.owner.invokeSession(sessionId, 'setWorkflow', [draft.workflowId]);
+      try {
+        await this.owner.invokeSession(sessionId, 'setWorkflow', [draft.workflowId]);
+      } catch (error) {
+        // A draft can remember a workflow deleted since; it starts on the
+        // built-in Default, which cannot be deleted.
+        if (!/workflow ".*" not found/.test(error instanceof Error ? error.message : String(error))) throw error;
+        await this.owner.invokeSession(sessionId, 'setWorkflow', ['default']);
+      }
     }
     if (draft.orchestrationMode !== undefined) {
       await this.owner.invokeSession(sessionId, 'setOrchestrationMode', [draft.orchestrationMode]);
@@ -770,7 +777,7 @@ export class SessionHostLifecycle {
   ): Promise<DesktopCapabilityResult<T>> {
     let result: { value: unknown; snapshot: SessionSnapshot };
     try {
-      const forwarded = isProjectScopedCapability(capability) ? await this.projectScopedArgs(args) : args;
+      const forwarded = await this.forwardedArgs(capability, args);
       result = sessionId
         ? await this.owner.invokeSession(sessionId, capability, forwarded)
         : await this.owner.invokeControlResult(capability, forwarded);
@@ -781,6 +788,20 @@ export class SessionHostLifecycle {
       value: copyCapabilityValue(result.value) as T,
       snapshot: result.snapshot,
     };
+  }
+
+  /** Arguments as the daemon receives them. `skillsStatus({ projectPath })`
+   *  (a new-task draft) is resolved like a new task's workspace — a
+   *  registered Project or its managed worktree, anything else refused — and
+   *  forwarded as that folder (`{ cwd }`), which decides each skill's
+   *  `activeHere`. The renderer never names the folder itself. */
+  private async forwardedArgs(capability: DesktopCapability, args: unknown[]): Promise<unknown[]> {
+    if (isProjectScopedCapability(capability)) return this.projectScopedArgs(args);
+    if (capability === 'skillsStatus' && args.length) {
+      const { projectPath } = args[0] as { projectPath: string };
+      return [{ cwd: (await this.owner.resolveSessionWorkspace(projectPath)).cwd }];
+    }
+    return args;
   }
 
   /** The session-less worktree capabilities act on a registered Project only:
@@ -813,9 +834,7 @@ export class SessionHostLifecycle {
             value: copyCapabilityValue(
               await this.owner.invokeControl(
                 request.capability,
-                isProjectScopedCapability(request.capability)
-                  ? await this.projectScopedArgs(request.args || [])
-                  : request.args || []
+                await this.forwardedArgs(request.capability, request.args || [])
               )
             ),
           };

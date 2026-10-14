@@ -4,6 +4,55 @@ Wichtige Änderungen, die neuesten zuerst. Die Deploy-Pipeline verweigert einen 
 
 ## Unreleased
 
+## v1.2.1 - 2026-10-14
+
+Unterhaltungsimport aus Codex und Claude Code, den Command Code-Anbieter sowie `$`-Skill-Erwähnungen hinzugefügt und Computer Use-Eingabebeobachtung, Skill-Skripte, automatisches Denken sowie mehrere Sitzungsprobleme behoben.
+
+### Neue Funktionen
+
+- **Unterhaltungen importieren** — Einstellungen > Allgemein > Unterhaltungen importieren hinzugefügt, um Chats aus Codex und Claude Code auf diesem PC in Mixdog zu übernehmen.
+- **Command Code** — Command Code als Anbieter hinzugefügt, der die Anmeldung mit Ihrem Command Code-Konto ermöglicht.
+- **Richtlinien zum Kontowechsel** — Manuell, Beim Limit wechseln und Meiste Reserve zuerst für Anbieter mit mehreren Konten hinzugefügt.
+- **`$`-Skill-Erwähnungen** — `$` im Composer und im TUI hinzugefügt, um einen Skill auszuwählen und auf die Nachricht anzuwenden.
+- **5-Stunden-Nutzungsbalken** — Option im Nutzungsmenü hinzugefügt, die einen 5-Stunden-Balken neben dem längsten Zeitraum auf der Leiste anzeigt (#66).
+- **Karten für Visualisierungs-Feedback** — Composer-Karten für gepinnte Visualisierungen, Auswahlen und Tweaks sowie Pins auf Bildern, Video-Frames und Bereichen hinzugefügt.
+- **Goal schließen** — Schaltfläche hinzugefügt, um ein beendetes Goal zu schließen.
+
+### Änderungen
+
+- MCP-Server für Claude Code- und Codex-Plugins so geändert, dass sie sich automatisch verbinden, und Laden von Claude Code-Plugin-Skills hinzugefügt (#58).
+- Sitzungsliste so geändert, dass sie aus einer lokalen Datenbank und Caches geladen wird, damit sie schneller öffnet.
+- Skills auf SSH-Servern so geändert, dass Modellaufrufe über Ihren PC geleitet werden, sodass der Server keine Anmeldedaten benötigt.
+- `@`-Dateierwähnungen so geändert, dass Ordner zuerst aufgeführt werden.
+- Symbole für Muse Code und MiMo auf eigene Symbole geändert.
+- Miniaturansichten gesendeter Bilder so geändert, dass sie als herunterskalierte Vorschauen auf dem PC und verbundenen Smartphones geladen werden.
+- MCP-Tool-Laden, Dateisuchen und Kontospeicherungen so angepasst, dass sie in langen Sitzungen den Hintergrunddienst nicht mehr blockieren.
+- Goal-Fortschrittsanzeige so angepasst, dass sie immer fünf Zellen anzeigt.
+- Composer-Insel so angepasst, dass sie 12px über der Prompt-Karte liegt, und 14px-Tool-Aktivitätszeilen wiederhergestellt.
+
+### Fehlerbehebungen
+
+- Behoben: Computer Use blieb mit "foreground input observation is unavailable" nicht verfügbar; verpasste Eingaben zählen nun als Nutzereingaben, Beobachtung erholt sich selbst und Diagnose nennt die Ursache (#66).
+- Behoben: Das Hinzufügen eines SSH-Servers in der installierten App blieb dauerhaft bei "Verbindung wird hergestellt…" stehen; die Server-Lockdatei wird nun mitgeliefert (#69, danke an @victorwon2001).
+- Behoben: Chat-Links öffneten den In-App-Browser auf einer leeren `about:blank`-Seite statt des Links (#63).
+- Behoben: Gebündelte Skill-Skripte, einschließlich des Skill-Validators, schlugen bei manchen Installationen und Shells fehl (#62).
+- Behoben: Neue Aufgaben, die einen gelöschten Workflow gespeichert hatten, starten nun mit Default (#64).
+- Behoben: Automatisches Denken wurde in 1.2.0 auf Claude-Routen nicht angewendet, und eine langsame Bewertung führte bei folgenden zu Timeouts.
+- Behoben: Gemini-, Anthropic-, OpenAI- und OpenAI-kompatible Anbieter listeten keine Modelle auf, wenn der Schlüssel nach dem Start hinzugefügt wurde.
+- Behoben: Eine direkt nach dem Start einer neuen Aufgabe gesendete zweite Nachricht öffnete eine separate Sitzung.
+- Behoben: Schnelles Aufwärtsscrollen auf Smartphones stockte und sprang bei der nächsten Berührung weit nach oben.
+- Behoben: Der Umbenennen-Editor schloss sich sofort bei Sitzungen, die sowohl in einem Projektordner als auch unter Zuletzt verwendet aufgeführt waren.
+- Behoben: Miniaturansichten zeigten in wiederhergestellten Unterhaltungen mit mehreren Bildern das falsche Bild an.
+- Behoben: Hook-Befehle erbten interne Laufzeiteinstellungen von Mixdog.
+- Behoben: Monitorlose Ausführungen, wie Modellaufrufe aus Skill-Skripten, konnten Muse Code oder MiMo nicht nutzen.
+- Behoben: Bestätigungsdialog erschien beim Entfernen eines MCP-Servers oder Plugins nicht.
+- Behoben: Die ONNX-Laufzeitumgebung konnte auf Windows-PCs ohne Visual C++-Laufzeit nicht geladen werden; diese wird nun mit der App ausgeliefert.
+
+### Sonstiges
+
+- Übersetzungen in allen 11 Sprachen überprüft.
+- Nicht verwendete Helfer entfernt und Desktop-Tests formatiert (#68, danke an @22nsuk).
+
 ## v1.2.0 - 2026-10-13
 
 Diese Version führt das Änderungen-Panel und änderungsbezogene Verlaufskarten pro Durchlauf mit Steuerelementen zum Rückgängigmachen und Wiederholen ein, hält den früheren Gesprächsverlauf nach einer Kompaktierung lesbar und fügt ein integriertes Visualisierungstool für interaktive UI-Entwürfe und Diagramme hinzu. Remote-Workflows werden durch SSH-Serververbindungen, isolierte Git-Worktree-Sitzungen, Steuerung von Hintergrund-Shells und direkte Dateidownloads auf gekoppelten Mobiltelefonen erweitert. Die Benutzeroberfläche bietet zudem kontrastreichere Farben, flüssigeres Scrollen auf Mobilgeräten und flexible Sitzungsorganisation.

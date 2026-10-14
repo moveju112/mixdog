@@ -18,6 +18,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { t } from './i18n';
+import { useMobileBack } from './mobile-back';
 import { useMobileRemoteSurface } from './mobile-surface';
 import { commitImmediateOverlay } from './immediate-overlay';
 import { usePhoneDockSwitchActions } from './phone-dock-switch';
@@ -56,17 +57,12 @@ export interface DockAction {
  *  their own roots and pass their own props instead. */
 export const PaneDockExpandContext = createContext<{ expanded: boolean; toggle(): void } | null>(null);
 
-/** The right-end controls are fixed: ⋯, Expand, Close (+ an inline Save). */
-export const DOCK_HEADER_BUTTON_WIDTH = 28;
-
 /** Splits header actions: `inline` ones are buttons, everything else is a ⋯
  *  menu item at every width. */
 export function splitDockActions(actions: readonly DockAction[]): { inline: DockAction[]; menu: DockAction[] } {
   return { inline: actions.filter((action) => action.inline), menu: actions.filter((action) => !action.inline) };
 }
 
-/** Surfaces live in their own React roots, so the header's X reaches the
- *  owning dock through this window event rather than a context. */
 /** Wheel mapping of the pane workspace strip: the vertical wheel drives the
  *  horizontal tab run (WorkspaceTabStrip `onWheel`). */
 export function scrollTabListByWheel(
@@ -77,6 +73,8 @@ export function scrollTabListByWheel(
   if (list && delta) list.scrollBy?.({ left: delta, behavior: 'auto' });
 }
 
+/** Surfaces live in their own React roots, so the header's X reaches the
+ *  owning dock through this window event rather than a context. */
 export const PANE_DOCK_CLOSE_EVENT = 'mixdog:pane-dock-close';
 export type PaneDockCloseSurface = 'browser' | 'terminal' | 'session-diff' | 'visualize';
 export function requestPaneDockClose(surface: PaneDockCloseSurface): void {
@@ -153,6 +151,7 @@ export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
     commitImmediateOverlay(() => setOpen(false));
     trigger.current?.focus();
   };
+  useMobileBack(open, close);
   // biome-ignore lint/correctness/useExhaustiveDependencies: enabledItems only reads refs; focus moves once per open
   useEffect(() => {
     if (open) enabledItems()[0]?.focus();
@@ -257,7 +256,7 @@ export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
                   key={item.id}
                   type="button"
                   role={dockMenuItemRole(item)}
-                  aria-checked={item.checked === undefined ? undefined : item.checked}
+                  aria-checked={item.checked}
                   className={item.separatorBefore ? 'has-separator' : undefined}
                   data-attention={item.attention || item.badge ? 'true' : undefined}
                   disabled={item.disabled}
@@ -342,7 +341,7 @@ export function DockHeaderRow({
               type="button"
               className="browser-pane-nav-button"
               aria-label={action.label}
-              aria-pressed={action.checked === undefined ? undefined : action.checked}
+              aria-pressed={action.checked}
               data-attention={action.attention ? 'true' : undefined}
               data-tooltip={action.label}
               disabled={action.disabled}

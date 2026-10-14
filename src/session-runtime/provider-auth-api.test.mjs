@@ -34,6 +34,7 @@ const admin = {
     accounts: [{ id: 'a1' }, { id: 'a2' }, { id: 'a3' }, { id: 'a4' }, { id: 'a5' }],
     selectedId: 'a1',
   }),
+  materializeProviderAccounts: async (providerId) => admin.listProviderAccounts(providerId),
   updateProviderAccounts: (providerId, change) => {
     calls.push(['updateAccounts', providerId, change]);
     return { selectedId: change.selectedId ?? 'a1' };
@@ -176,7 +177,7 @@ test('the account roster paints immediately and one bounded usage sweep runs per
   await setImmediate();
   const usage = calls.filter(([name]) => name === 'usage');
   assert.equal(usage.length, 5);
-  assert.deepEqual(usage[0], ['usage', { provider: 'oauth', accountId: 'a1' }, { account: 'a1' }, undefined]);
+  assert.deepEqual(usage[0], ['usage', { provider: 'oauth', accountId: 'a1' }, { account: 'a1' }, { force: false }]);
   calls.length = 0;
   api.getProviderAccounts('plain');
   await setImmediate();

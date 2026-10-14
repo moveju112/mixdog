@@ -53,12 +53,47 @@
 .sidebar-usage-heading.session-panel-header::after {
   display: none;
 }
-/* Same pin as the rail More menu: muted when off, plain text when pinned. */
-.sidebar-usage-heading .sidebar-usage-pin {
+/* The ··· menu trigger: muted ink, lifted while its menu is open. */
+.sidebar-usage-heading .sidebar-usage-menu {
   color: var(--mx-text-muted);
 }
-.sidebar-usage-heading .sidebar-usage-pin.is-active {
+.sidebar-usage-heading .sidebar-usage-menu[aria-expanded="true"] {
   color: var(--mx-text);
+  background: var(--mx-hover);
+}
+/* ··· menu panel (portaled, row-overflow-menu grammar): pin check row, group
+   label, then the rail bar mode as check-marked radios (hints are tooltips). */
+.row-overflow-menu.usage-menu {
+  width: 220px;
+  --mx-menu-row-height: 30px;
+}
+/* Long translations wrap instead of truncating; the check stays on the first
+   line. */
+.row-overflow-menu.usage-menu > button {
+  align-items: flex-start;
+}
+.row-overflow-menu.usage-menu .row-overflow-label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.row-overflow-menu.usage-menu .row-overflow-check {
+  margin-top: -1px;
+}
+.row-overflow-menu.usage-menu > button[role="menuitemradio"][aria-checked="true"] {
+  font-weight: var(--mx-weight-semibold);
+}
+.usage-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--mx-border-muted);
+}
+.usage-menu-group {
+  padding: 6px 10px 2px;
+  color: var(--mx-text-muted);
+  font-size: var(--mx-font-supporting);
+  font-weight: var(--mx-weight-semibold);
 }
 /* The roster is ONE grid: label | track | percentage | reset. Every provider
    row and quota line subgrids these columns, so the label column is exactly

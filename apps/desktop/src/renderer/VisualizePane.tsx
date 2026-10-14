@@ -2,17 +2,27 @@
 // session. Main owns the tabs; this view draws the active one and reports the
 // user's tab picks and closes. Capture finds the tab body by its data
 // attributes, so they name the session and tab.
-import { ChevronLeft, ChevronRight, Eye, ListTree, MessageSquarePlus, SlidersHorizontal, Wifi, WifiOff, X } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  ListTree,
+  MessageSquarePlus,
+  SlidersHorizontal,
+  Wifi,
+  WifiOff,
+  X,
+} from 'lucide-react';
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import type { DesktopApi } from '../shared/contract';
 import { type VisualizePaneSource, type VisualizePaneView, visualizeProblemLocation } from '../shared/visualize';
 import { withVisualizeFeedbackScript } from '../shared/visualize-feedback';
 import { remotePageGate } from '../shared/visualize-scripts';
 import { t } from './i18n';
-import { useVisualizeFeedbackBridge, VisualizeCommentLayer } from './VisualizeFeedback';
+import { visualizeCommentKind } from '../shared/visualize-comment-kinds';
+import { useVisualizeFeedbackBridge, VisualizeCommentHints, VisualizeCommentLayer } from './VisualizeFeedback';
 import { startElementPin, useVisualizeInspection, VisualizeElements } from './VisualizeElements';
-import { visualizeRegionPane } from './visualize-feedback-store';
 import { VisualizeTweaksDrawer } from './VisualizeTweaks';
 import { useVisualizeTweaksRevision, visualizeTabHasTweaks } from './visualize-tweaks-store';
 import { loadSandboxedPage } from './sandboxed-page-preview';
@@ -179,6 +189,25 @@ function RemotePaneContent({
 
 type VisualizeTab = ReturnType<typeof useVisualizeState>['tabs'][number];
 
+function networkActionLabel(allowed: boolean | undefined, blocked: boolean): string {
+  if (allowed) return t('Network allowed');
+  return blocked ? t('Network blocked — click to allow') : t('Allow outside network');
+}
+
+function problemOrigin(tab: VisualizeTab, problem: NonNullable<VisualizeTab['problems']>[number]): string {
+  return [
+    tab.panes.length > 1 ? tab.panes[problem.pane]?.label : '',
+    typeof problem.version === 'number' ? t('kept v{{n}}', { n: problem.version }) : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function paneLabelText(tab: VisualizeTab, pane: VisualizePaneView): string {
+  if (!tab.compare) return pane.label;
+  return `${pane.version !== undefined ? `v${pane.version}` : t('Live')} · ${pane.label}`;
+}
+
 /** The active tab's version history: "◀ v2 / 3 ▶", Compare, and — while a
  *  kept version is shown (read-only, live reloads paused) — Restore and
  *  Back to live. Absent until the tab keeps two versions. */
@@ -196,7 +225,9 @@ function VersionBar({ sessionId, tab }: { sessionId: string; tab: VisualizeTab }
   };
   const restore = () => {
     if (snapshot === null) return;
-    const files = [...new Set(tab.panes.filter((pane) => pane.version !== undefined).map((pane) => pane.target))].join(', ');
+    const files = [...new Set(tab.panes.filter((pane) => pane.version !== undefined).map((pane) => pane.target))].join(
+      ', '
+    );
     // Kept page assets that changed since: other pages may share them.
     const assets = tab.restoreAssets ?? [];
     const message = assets.length
@@ -222,27 +253,27 @@ function VersionBar({ sessionId, tab }: { sessionId: string; tab: VisualizeTab }
         </div>
       ) : null}
       <div className="visualize-versionbar" role="toolbar" aria-label={t('Version history')}>
-      <button
-        type="button"
-        className="visualize-version-step"
-        aria-label={t('Previous version')}
-        data-tooltip={t('Previous version')}
-        disabled={visualizeVersionStep(tab, -1) === undefined}
-        onClick={() => step(-1)}
-      >
-        <ChevronLeft size={14} aria-hidden="true" />
-      </button>
-      <span className="visualize-version-count">{`v${position.shown} / ${position.newest}`}</span>
-      <button
-        type="button"
-        className="visualize-version-step"
-        aria-label={t('Next version')}
-        data-tooltip={t('Next version')}
-        disabled={visualizeVersionStep(tab, 1) === undefined}
-        onClick={() => step(1)}
-      >
-        <ChevronRight size={14} aria-hidden="true" />
-      </button>
+        <button
+          type="button"
+          className="visualize-version-step"
+          aria-label={t('Previous version')}
+          data-tooltip={t('Previous version')}
+          disabled={visualizeVersionStep(tab, -1) === undefined}
+          onClick={() => step(-1)}
+        >
+          <ChevronLeft size={14} aria-hidden="true" />
+        </button>
+        <span className="visualize-version-count">{`v${position.shown} / ${position.newest}`}</span>
+        <button
+          type="button"
+          className="visualize-version-step"
+          aria-label={t('Next version')}
+          data-tooltip={t('Next version')}
+          disabled={visualizeVersionStep(tab, 1) === undefined}
+          onClick={() => step(1)}
+        >
+          <ChevronRight size={14} aria-hidden="true" />
+        </button>
         <span className="visualize-versionbar-spacer" />
         <span className="visualize-version-secondary">
           <button
@@ -274,15 +305,7 @@ function VersionBar({ sessionId, tab }: { sessionId: string; tab: VisualizeTab }
   );
 }
 
-export function VisualizePane({
-  sessionId,
-  active,
-  onClose,
-}: {
-  sessionId: string;
-  active: boolean;
-  onClose(): void;
-}) {
+export function VisualizePane({ sessionId, active, onClose }: { sessionId: string; active: boolean; onClose(): void }) {
   const state = useVisualizeState(sessionId);
   // Present only on a paired remote client.
   const remoteSource = window.mixdogDesktop?.visualizePaneSource;
@@ -358,7 +381,8 @@ export function VisualizePane({
   const [comment, setComment] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId is the reset trigger
   useEffect(() => setComment(false), [sessionId]);
-  const commentable = Boolean(tab?.panes.some((pane) => pane.kind === 'html' || visualizeRegionPane(pane.kind)));
+  const commentKinds = (tab?.panes ?? []).filter((pane) => visualizeCommentKind(pane.kind)).map((pane) => pane.kind);
+  const commentable = commentKinds.length > 0;
   useVisualizeFeedbackBridge({ sessionId, tab, body, comment: comment && commentable, setComment });
   const commentAction = commentable
     ? [
@@ -427,11 +451,7 @@ export function VisualizePane({
           {
             id: 'network',
             // "Blocked" only once the page actually asked for something.
-            label: tab.networkAllowed
-              ? t('Network allowed')
-              : networkBlocked
-                ? t('Network blocked — click to allow')
-                : t('Allow outside network'),
+            label: networkActionLabel(tab.networkAllowed, networkBlocked),
             icon: tab.networkAllowed ? Wifi : WifiOff,
             inline: true,
             attention: networkBlocked,
@@ -501,16 +521,14 @@ export function VisualizePane({
         )}
         onClose={onClose}
       />
+      {comment && commentable ? (
+        <VisualizeCommentHints sessionId={sessionId} kinds={commentKinds} onEnd={() => setComment(false)} />
+      ) : null}
       {tab?.problems?.length && problemsOpen === tab.id ? (
         <ul className="visualize-problems" aria-label={t('Page problems')}>
           {tab.problems.map((problem) => {
             const where = visualizeProblemLocation(problem);
-            const origin = [
-              tab.panes.length > 1 ? tab.panes[problem.pane]?.label : '',
-              typeof problem.version === 'number' ? t('kept v{{n}}', { n: problem.version }) : '',
-            ]
-              .filter(Boolean)
-              .join(' ');
+            const origin = problemOrigin(tab, problem);
             return (
               <li key={`${problem.pane}:${problem.kind}:${problem.source}:${problem.line}:${problem.message}`}>
                 {origin ? <span className="visualize-problem-origin">{origin}</span> : null}
@@ -546,51 +564,65 @@ export function VisualizePane({
           data-visualize-session={sessionId}
           data-visualize-tab={tab.id}
         >
-          {tab.panes.map((pane, index) => (
-            // The revision remounts a pane when its file changed on disk.
-            <div key={`${tab.id}:${tab.revision}:${index}`} className="visualize-pane-cell" data-visualize-pane={index}>
-              {tab.panes.length > 1 && (
-                <div
-                  className={`visualize-pane-label${pane.version !== undefined ? ' is-snapshot' : ''}`}
-                  title={pane.target}
-                >
-                  {tab.compare ? `${pane.version !== undefined ? `v${pane.version}` : t('Live')} · ${pane.label}` : pane.label}
+          {tab.panes.map((pane, index) => {
+            const showSource = extras.sourceOn && visualizePaneHasSource(pane);
+            let content: ReactNode;
+            if (showSource) {
+              content = <VisualizeSource pane={pane} sessionId={sessionId} tabId={tab.id} index={index} />;
+            } else if (pane.kind === 'inline') {
+              // Inline content travels in the tab state (host and remote
+              // alike) and renders here in the same dead sandbox.
+              content = (
+                <InlinePaneContent
+                  pane={pane}
+                  onRendered={(error) => reportVisualizeRender(sessionId, tab.id, index, pane.renderId, error)}
+                />
+              );
+            } else if (remoteSource) {
+              content = (
+                <RemotePaneContent
+                  pane={pane}
+                  sessionId={sessionId}
+                  tabId={tab.id}
+                  index={index}
+                  load={remoteSource}
+                  commenting={comment && commentable}
+                />
+              );
+            } else {
+              content = <PaneContent pane={pane} />;
+            }
+            return (
+              <div
+                // The revision remounts a pane when its file changed on disk.
+                // biome-ignore lint/suspicious/noArrayIndexKey: panes are positional (pane N is the Nth file), never reordered
+                key={`${tab.id}:${tab.revision}:${index}`}
+                className="visualize-pane-cell"
+                data-visualize-pane={index}
+              >
+                {tab.panes.length > 1 && (
+                  <div
+                    className={`visualize-pane-label${pane.version !== undefined ? ' is-snapshot' : ''}`}
+                    title={pane.target}
+                  >
+                    {paneLabelText(tab, pane)}
+                  </div>
+                )}
+                <div className="visualize-pane-content">
+                  {content}
+                  {visualizeCommentKind(pane.kind) && !showSource && (
+                    <VisualizeCommentLayer
+                      sessionId={sessionId}
+                      tab={tab}
+                      pane={pane}
+                      index={index}
+                      comment={comment && commentable}
+                    />
+                  )}
                 </div>
-              )}
-              <div className="visualize-pane-content">
-                {extras.sourceOn && visualizePaneHasSource(pane) ? (
-                  <VisualizeSource pane={pane} sessionId={sessionId} tabId={tab.id} index={index} />
-                ) : pane.kind === 'inline' ? (
-                  // Inline content travels in the tab state (host and remote
-                  // alike) and renders here in the same dead sandbox.
-                  <InlinePaneContent
-                    pane={pane}
-                    onRendered={(error) => reportVisualizeRender(sessionId, tab.id, index, pane.renderId, error)}
-                  />
-                ) : remoteSource ? (
-                  <RemotePaneContent
-                    pane={pane}
-                    sessionId={sessionId}
-                    tabId={tab.id}
-                    index={index}
-                    load={remoteSource}
-                    commenting={comment && commentable}
-                  />
-                ) : (
-                  <PaneContent pane={pane} />
-                )}
-                {(pane.kind === 'html' || visualizeRegionPane(pane.kind)) && !(extras.sourceOn && visualizePaneHasSource(pane)) && (
-                  <VisualizeCommentLayer
-                    sessionId={sessionId}
-                    tab={tab}
-                    pane={pane}
-                    index={index}
-                    comment={comment && commentable}
-                  />
-                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="visualize-empty">{t('Results the agent shows will appear here.')}</div>

@@ -9,7 +9,13 @@ import { t as translate } from './i18n.ts';
 
 function mount(t) {
   const { dom, root } = installTestDom(t, {
-    expose: ['HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'MouseEvent'],
+    expose: ['HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'MouseEvent', 'MutationObserver'],
+    globals: {
+      ResizeObserver: class {
+        observe() {}
+        disconnect() {}
+      },
+    },
     rootId: 'root',
   });
   dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
@@ -482,7 +488,10 @@ test('the shared poll runs once for all subscribers, pauses while hidden and ref
   let nextTimer = 1;
   globalThis.document = doc;
   globalThis.window = {
-    setInterval: (fn) => (timers.set(nextTimer, fn), nextTimer++),
+    setInterval: (fn) => {
+      timers.set(nextTimer, fn);
+      return nextTimer++;
+    },
     clearInterval: (id) => timers.delete(id),
   };
   t.after(() => {

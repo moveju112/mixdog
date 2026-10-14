@@ -5,6 +5,55 @@ la section Unreleased est vide, et l'estampille avec la version publiée.
 
 ## Unreleased
 
+## v1.2.1 - 2026-10-14
+
+Ajout de l'importation de conversations depuis Codex et Claude Code, du fournisseur Command Code et des mentions de skills avec `$`, et correction de l'observation des entrées de Computer Use, des scripts de skills, du raisonnement automatique et de plusieurs problèmes de session.
+
+### Nouvelles fonctionnalités
+
+- **Importer des conversations** — Ajout de Réglages > Général > Importer des conversations pour importer les discussions Codex et Claude Code de ce PC dans Mixdog.
+- **Command Code** — Ajout de Command Code comme fournisseur permettant de se connecter avec votre compte Command Code.
+- **Règles de changement de compte** — Ajout des options Manuel, Changer à la limite et Plus de marge d’abord pour les fournisseurs ayant plusieurs comptes.
+- **Mentions de skills avec `$`** — Ajout de `$` dans le compositeur et le TUI pour sélectionner un skill et l'appliquer au message.
+- **Barre d'utilisation de 5 heures** — Ajout d'une option du menu d'utilisation affichant une barre de 5 heures à côté de la période la plus longue sur le rail latéral (#66).
+- **Cartes de retour de visualisation** — Ajout de cartes dans le compositeur pour les épingles, sélections et ajustements en file, ainsi que des épingles sur images, vidéos et zones.
+- **Fermer Goal** — Ajout d'un bouton pour fermer un Goal terminé.
+
+### Modifications
+
+- Modification des serveurs MCP des plugins Claude Code et Codex pour se connecter automatiquement sans activation manuelle, et ajout du chargement des skills de plugins (#58).
+- Modification de la liste des sessions pour se charger depuis une base de données locale et des caches afin de s'ouvrir plus rapidement.
+- Modification des skills sur serveurs SSH pour router les appels de modèles via votre PC, évitant d'enregistrer des identifiants sur le serveur.
+- Modification des mentions de fichiers avec `@` pour afficher les dossiers en premier.
+- Modification des icônes de Muse Code et MiMo pour afficher leurs propres icônes.
+- Modification des miniatures d'images envoyées pour se charger sous forme d'aperçus réduits sur le PC et les téléphones jumelés.
+- Ajustement du chargement des outils MCP, des recherches de fichiers et des sauvegardes de compte pour ne plus bloquer le service d'arrière-plan dans les longues sessions.
+- Ajustement de l'indicateur de progression de Goal pour toujours afficher cinq cellules.
+- Ajustement de l'îlot du compositeur pour se positionner 12px au-dessus de la carte de prompt et rétablissement des lignes d'activité des outils à 14px.
+
+### Corrections de bugs
+
+- Correction de Computer Use restant indisponible avec "foreground input observation is unavailable" ; les entrées manquées comptent comme utilisateur, l'observation récupère seule et le diagnostic indique la cause (#66).
+- Correction de l'ajout d'un serveur SSH dans l'application installée qui restait bloqué sur "Connexion…" en intégrant le fichier lock du serveur (#69, merci à @victorwon2001).
+- Correction des liens du chat qui ouvraient le navigateur intégré sur une page `about:blank` vierge au lieu du lien (#63).
+- Correction des scripts de skills intégrés, dont le validateur, qui échouaient sur certaines installations et shells (#62).
+- Correction des nouvelles tâches mémorisant un flux supprimé afin qu'elles démarrent sur Default (#64).
+- Correction du raisonnement automatique ne s'appliquant pas sur les routes Claude en 1.2.0, et d'une évaluation lente provoquant le dépassement de délai des suivantes.
+- Correction des fournisseurs Gemini, Anthropic, OpenAI et compatibles OpenAI ne listant pas les modèles lorsque la clé était ajoutée après le démarrage.
+- Correction d'un second message envoyé juste après le début d'une nouvelle tâche ouvrant une session distincte.
+- Correction du défilement rapide vers le haut sur téléphone qui se bloquait puis sautait loin au toucher suivant.
+- Correction de l'éditeur de renommage se fermant immédiatement pour les sessions listées à la fois dans un dossier de projet et dans Récents.
+- Correction des miniatures affichant la mauvaise image dans les conversations restaurées comportant plusieurs images.
+- Correction des commandes de hook héritant des réglages de runtime internes de Mixdog.
+- Correction des exécutions headless, comme les appels de modèles depuis des scripts de skills, incapables d'utiliser Muse Code ou MiMo.
+- Correction de la boîte de dialogue de confirmation qui n'apparaissait pas lors de la suppression d'un serveur MCP ou plugin.
+- Correction du runtime ONNX qui échouait à se charger sur les PC Windows sans le runtime Visual C++ en intégrant ce dernier à l'application.
+
+### Divers
+
+- Révision des traductions dans l'ensemble des 11 langues.
+- Suppression des helpers inutilisés et formatage des tests de bureau (#68, merci à @22nsuk).
+
 ## v1.2.0 - 2026-10-13
 
 Cette version introduit le panneau des modifications et les cartes de changements par tour avec commandes d'annulation et de réapplication par tour, conserve l'historique antérieur lisible après compactage et ajoute un outil de visualisation intégré pour les maquettes interactives et diagrammes. Les flux à distance s'étendent avec les connexions de serveur SSH, les sessions d'arbres de travail Git isolées, le contrôle des shells en arrière-plan et le téléchargement direct de fichiers sur les téléphones associés. L'interface propose également un contraste accru, un défilement mobile plus fluide et une organisation flexible des sessions.

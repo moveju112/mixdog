@@ -1,7 +1,7 @@
 # Fork Changes Ledger
 
-Last upstream sync: **v1.2.0 / ab53d8226**
-Upstream mobile baseline: **mobile-v0.1.13**
+Last upstream sync: **upstream/main / c088221d889a9ca2d8a3366b878df97604de5f5e**
+Upstream mobile baseline: **mobile-v0.1.14**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
@@ -31,7 +31,7 @@ Every entry's baseline upstream commit is `ab53d8226` (`v1.2.0`, upstream mobile
 
 | Field | Value |
 |---|---|
-| Status | active |
+| Status | retired |
 | Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java` (`onWindowFocusChanged`) |
 | Summary | Disable the immersive shell so a single swipe reaches Home |
 | Upstream behavior | Hides the navigation bar and shows it transiently on edge swipe (`BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE`) |
@@ -39,7 +39,7 @@ Every entry's baseline upstream commit is `ab53d8226` (`v1.2.0`, upstream mobile
 | Reason | With the bar hidden, leaving the app needed two upward swipes |
 | Default decision | **Adopt upstream** (`원본 채택`) if upstream also keeps the navigation bar visible; otherwise case b |
 | Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MainActivity.java:140` |
-| History | 2026-10-13 introduced for fork build `0.1.13.002` |
+| History | 2026-10-13 introduced for fork build `0.1.13.002`; 2026-10-14 retired: upstream `ed5c9248ce0aeca653974d508cc7434fefc947a6` removes immersive navigation hiding, satisfying the same single-swipe Home intent (case a) |
 
 ## F003 — Wider phone session drawer
 
@@ -140,7 +140,13 @@ New rule/audit files under these owned paths extend this section's ownership wit
 | `mobile-v0.1.13` | 003 | `0.1.13.003` | `101303` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.003` |
 | `mobile-v0.1.13` | 004 | `0.1.13.004` | `101304` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.004` |
 | `mobile-v0.1.13` | 005 | `0.1.13.005` | `101305` | 2026-10-14 | release tag target | published | `mobile-v0.1.13.005` |
+| `mobile-v0.1.14` | 001 | `0.1.14.001` | `101306` | 2026-10-14 | `18cd3323d` + upstream `c088221d889a9ca2d8a3366b878df97604de5f5e` (uncommitted merge) | built locally; mobile checks, signature, version and ZIP integrity verified | — |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.
+
+## Upstream sync history
+
+- 2026-10-14: integrated `upstream/main` at `c088221d889a9ca2d8a3366b878df97604de5f5e`. F002 retired under case a at upstream `ed5c9248ce0aeca653974d508cc7434fefc947a6`; F001 and F003–F007 remain active. Git merge commit and push to `origin/main` authorized; APK publication awaits separate approval.
+- 2026-10-14: `npm run check` (27 tests), `npm run test:java` and signed release build passed with JDK 21. F003/F006/F007 coupling names and event/DOM contracts remain compatible. APK `0.1.14.001` / `101306` saved to `/home/ubuntu/project/mixdog-fork-dist/Mixdog-0.1.14.001.apk`; certificate matches the previous fork APK. SHA-256: `9993e04ada50dc6204321600aac688946959d846ee5629641eeff4eba35a87d9`. Signature verification reports the same unsigned META-INF metadata warning class as the previous APK; device installation and runtime testing were not performed.
 `NNN` resets to `001` after an upstream mobile version change; versionCode never resets (previous + 1). See [tasks/RELEASE_APK.md](tasks/RELEASE_APK.md).

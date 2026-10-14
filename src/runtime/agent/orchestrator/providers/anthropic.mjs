@@ -1,4 +1,4 @@
-import { getAgentApiKey } from '../../../shared/provider-api-key.mjs';
+import { reloadProviderApiKey, resolveProviderApiKey } from '../../../shared/provider-api-key.mjs';
 import { sanitizeToolPairs } from '../session/context-utils.mjs';
 import { AnthropicFallbackTriggeredError } from './retry-classifier.mjs';
 import { readStreamOutcome } from './lib/stream-outcome.mjs';
@@ -42,8 +42,18 @@ export class AnthropicProvider {
   constructor(config) {
     this.config = config || {};
     this.name = this.config.name || 'anthropic';
-    this.apiKey = this.config.apiKey || (this.name === 'anthropic' ? process.env.ANTHROPIC_API_KEY : null);
+    this.apiKey = resolveProviderApiKey(this.name, this.config) || null;
     this.client = this._createClient(this.apiKey);
+  }
+  // Client for the currently resolved key; rebuilt when the key changed since
+  // it was built (e.g. a keyless-constructed instance).
+  _currentClient() {
+    const key = resolveProviderApiKey(this.name, this.config) || null;
+    if (key && key !== this.apiKey) {
+      this.apiKey = key;
+      this.client = this._createClient(key);
+    }
+    return this.client;
   }
   // Tool-search is a request capability, not an account capability. Keep it
   // off the client defaults and add it only on turns that actually serialize
@@ -55,8 +65,10 @@ export class AnthropicProvider {
     const custom = isCustomProviderName(this.name);
     const keyless = custom && this.config.keyless === true;
     const betaHeaders = this.config.disableBetaHeaders || custom ? null : buildAnthropicBetaHeaders();
+    let credentials = { apiKey };
+    if (custom) credentials = { apiKey: keyless ? '' : apiKey || '', authToken: null };
     return new (loadAnthropic())({
-      ...(custom ? { apiKey: keyless ? '' : apiKey || '', authToken: null } : { apiKey }),
+      ...credentials,
       ...(this.config.baseURL ? { baseURL: this.config.baseURL } : {}),
       defaultHeaders: {
         ...(betaHeaders ? { 'anthropic-beta': betaHeaders } : {}),
@@ -68,10 +80,7 @@ export class AnthropicProvider {
   }
   reloadApiKey() {
     try {
-      const newKey =
-        getAgentApiKey(this.name) ||
-        this.config.apiKey ||
-        (this.name === 'anthropic' ? process.env.ANTHROPIC_API_KEY : null);
+      const newKey = reloadProviderApiKey(this.name, this.config);
       if (newKey) {
         this.config = { ...(this.config || {}), apiKey: newKey };
         this.apiKey = newKey;
@@ -160,7 +169,7 @@ export class AnthropicProvider {
     // The SDK calls and their initial-response retry policy
     // (anthropic-api-transport.mjs).
     const transport = createAnthropicApiTransport({
-      client: this.client,
+      client: this._currentClient(),
       label: this.name,
       opts,
       useModel,
@@ -296,8 +305,7 @@ export class AnthropicProvider {
     }
   }
   async listModels() {
-    const apiKey =
-      this.apiKey || this.config?.apiKey || (this.name === 'anthropic' ? process.env.ANTHROPIC_API_KEY : null);
+    const apiKey = resolveProviderApiKey(this.name, this.config);
     if (!apiKey) return MODELS;
     try {
       const base = String(this.config?.baseURL || 'https://api.anthropic.com').replace(/\/+$/, '');
@@ -329,6 +337,6 @@ export class AnthropicProvider {
   async isAvailable() {
     // Availability probes must not spend tokens or depend on a live
     // network. Dispatch owns authentication validation and 401 reload.
-    return !!(this.apiKey || this.config?.apiKey || (this.name === 'anthropic' && process.env.ANTHROPIC_API_KEY));
+    return !!resolveProviderApiKey(this.name, this.config);
   }
 }

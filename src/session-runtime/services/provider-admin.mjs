@@ -55,6 +55,15 @@ import {
   loginOAuth as loginMuseCodeOAuth,
 } from '../../runtime/agent/orchestrator/providers/muse-code-oauth-login.mjs';
 import {
+  describeCommandCodeOAuthCredentials,
+  forgetCommandCodeOAuthCredentials,
+  hasCommandCodeOAuthCredentials,
+} from '../../runtime/agent/orchestrator/providers/command-code-oauth-tokens.mjs';
+import {
+  beginOAuthLogin as beginCommandCodeOAuthLogin,
+  loginOAuth as loginCommandCodeOAuth,
+} from '../../runtime/agent/orchestrator/providers/command-code-oauth-login.mjs';
+import {
   beginCursorOAuthLogin,
   describeCursorOAuthCredentials,
   forgetCursorOAuthCredentials,
@@ -80,6 +89,7 @@ import {
   changeProviderAccounts,
   removeProviderAccount,
   clearProviderAccountQuotaState,
+  providerAccountLimit,
   ACCOUNT_PROVIDERS,
 } from '../../runtime/shared/provider-accounts.mjs';
 import { currentProviderAccountId, withProviderAccount } from '../../runtime/shared/provider-auth-binding.mjs';
@@ -153,6 +163,16 @@ const OAUTH_PROVIDERS = Object.freeze([
     forget: forgetMuseCodeOAuthCredentials,
     begin: beginMuseCodeOAuthLogin,
     login: loginMuseCodeOAuth,
+  }),
+  Object.freeze({
+    id: 'command-code-oauth',
+    name: 'Command Code',
+    desc: 'Sign in with your Command Code account',
+    has: hasCommandCodeOAuthCredentials,
+    describe: describeCommandCodeOAuthCredentials,
+    forget: forgetCommandCodeOAuthCredentials,
+    begin: beginCommandCodeOAuthLogin,
+    login: loginCommandCodeOAuth,
   }),
   Object.freeze({
     id: 'mimo-oauth',
@@ -421,6 +441,12 @@ function customProviderRow(id, entry, checkSecrets = true) {
   const keyless = (config?.auth ?? entry.auth) === 'none';
   const stored = checkSecrets ? hasStoredSecret(SECRET_ACCOUNTS.agentApiKey(id)) : false;
   const unstoredStatus = configuredEnabled ? 'No Key' : 'Off';
+  let status = stored ? 'Set' : unstoredStatus;
+  let detail = stored ? 'stored in keychain' : 'custom endpoint';
+  if (keyless) {
+    status = configuredEnabled ? 'Keyless' : 'Off';
+    detail = 'no API key required';
+  }
   const row = {
     id,
     name: entry.name,
@@ -431,12 +457,12 @@ function customProviderRow(id, entry, checkSecrets = true) {
     group: 'api',
     type: 'api-key',
     enabled: configuredEnabled,
-    authenticated: keyless ? true : checkSecrets ? stored : configuredEnabled,
+    authenticated: keyless || (checkSecrets ? stored : configuredEnabled),
     stored,
     env: false,
     envName: null,
-    status: keyless ? (configuredEnabled ? 'Keyless' : 'Off') : stored ? 'Set' : unstoredStatus,
-    detail: keyless ? 'no API key required' : stored ? 'stored in keychain' : 'custom endpoint',
+    status,
+    detail,
   };
   row.schemaVersion = config?.schemaVersion ?? entry.schemaVersion;
   row.auth = keyless ? 'none' : 'key';
@@ -584,7 +610,7 @@ export async function loginOAuthProvider(cfgMod, provider) {
     updateConfigProvider(cfgMod, id, { enabled: true });
     // Same reason as the interactive add-account flow: a fresh credential says
     // nothing about the quota the previous one exhausted.
-    if (ACCOUNT_PROVIDERS.includes(id)) clearProviderAccountQuotaState(id, currentProviderAccountId(id));
+    if (ACCOUNT_PROVIDERS.includes(id)) await clearProviderAccountQuotaState(id, currentProviderAccountId(id));
   }
   return { provider: id, type: 'oauth', authenticated: Boolean(auth.authenticated), status: auth.status || null };
 }
@@ -621,7 +647,7 @@ function rosterAccountForIdentity(id, oauth, newAccountId, auth) {
   return match?.id || null;
 }
 
-function settleOAuthLogin(
+async function settleOAuthLogin(
   { cfgMod, id, accountId: signedInId, addAccount, includeDefault, label, inAccount, oauth },
   result
 ) {
@@ -635,11 +661,11 @@ function settleOAuthLogin(
       renameSync(providerAccountPath(id, signedInId), providerAccountPath(id, existingId));
       accountId = existingId;
     }
-    registerProviderAccount(id, accountId, { includeDefault, label });
+    await registerProviderAccount(id, accountId, { includeDefault, label });
     // A re-connect can follow a re-created subscription under the same
     // account id: start it from no recorded quota rather than from the
     // exhausted window the previous credential earned.
-    clearProviderAccountQuotaState(id, accountId);
+    await clearProviderAccountQuotaState(id, accountId);
     updateConfigProvider(cfgMod, id, { enabled: true });
   }
   return {
@@ -688,12 +714,20 @@ export async function beginOAuthProviderLogin(cfgMod, provider, options = {}) {
   // The callback and a pasted code can both deliver the same sign-in; it must
   // settle once, because settling may move the credential to an existing id.
   let settled = null;
+  let settling = null;
   const finish = async (result) => {
     if (!result || cancelled) return null;
     if (settled) return settled;
-    const outcome = settleOAuthLogin(login, result);
-    if (outcome.authenticated) settled = outcome;
-    return outcome;
+    // Settling is async now: a second delivery arriving mid-write shares it.
+    if (settling) return settling;
+    settling = settleOAuthLogin(login, result);
+    try {
+      const outcome = await settling;
+      if (outcome.authenticated) settled = outcome;
+      return outcome;
+    } finally {
+      settling = null;
+    }
   };
   return {
     provider: id,
@@ -721,9 +755,11 @@ export function listProviderAccounts(provider) {
   if (!oauth) throw new TypeError('Unknown OAuth provider.');
   const pool = readProviderAccountPool(provider);
   const accounts = pool.accounts.length ? pool.accounts : defaultAccountRows(provider, oauth);
+  const now = Date.now();
   return {
     provider,
     auto: pool.auto !== false,
+    policy: pool.policy,
     useCredits: pool.useCredits === true,
     selectedId: pool.selectedId || accounts[0]?.id || null,
     accounts: accounts.map((row) => {
@@ -740,6 +776,9 @@ export function listProviderAccounts(provider) {
         reauthRequired: auth.reauthRequired === true,
         usage: row.usage || null,
         blockedUntil: row.blockedUntil || null,
+        // The limit holding the account now: account-wide, or only for one
+        // model family ("7D Fable") while other models still run.
+        limit: providerAccountLimit(row, now, { useCredits: pool.useCredits === true }),
         ...(identity ? { identity } : {}),
         ...(typeof auth.email === 'string' && auth.email.trim() ? { email: auth.email.trim() } : {}),
       };
@@ -753,17 +792,23 @@ function defaultAccountRows(provider, oauth) {
   return authenticated ? [{ id: 'default', label: 'Account 1' }] : [];
 }
 
-export function updateProviderAccounts(provider, change) {
+// Store the implicit signed-in `default` account in the roster, so a change or
+// a usage measurement has a row to land on. Returns the current roster view.
+export async function materializeProviderAccounts(provider) {
   const current = listProviderAccounts(provider);
-  if (!readProviderAccountPool(provider).accounts.length && current.accounts.length) {
-    registerProviderAccount(provider, 'default', { label: 'Account 1' });
-  }
-  changeProviderAccounts(provider, change);
+  if (readProviderAccountPool(provider).accounts.length || !current.accounts.length) return current;
+  await registerProviderAccount(provider, 'default', { label: 'Account 1' });
+  return listProviderAccounts(provider);
+}
+
+export async function updateProviderAccounts(provider, change) {
+  await materializeProviderAccounts(provider);
+  await changeProviderAccounts(provider, change);
   // Picking an account by hand is a decision to use it NOW, so the refusal
   // window and meter stored against it — both describing the state the user
   // just changed — are dropped here. Never in the pool's own fallback commit,
   // where clearing them would send the request back to a spent account.
-  if (change?.selectedId !== undefined) clearProviderAccountQuotaState(provider, change.selectedId);
+  if (change?.selectedId !== undefined) await clearProviderAccountQuotaState(provider, change.selectedId);
   return listProviderAccounts(provider);
 }
 
@@ -859,7 +904,8 @@ async function resolveCustomInput(cfgMod, rawInput, options) {
   const config = normalizeCustomProviderConfig(input, options);
   const typed = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
   const keyless = config.auth === 'none';
-  const apiKey = keyless ? '' : typed || (id ? getAgentApiKey(id) || '' : '');
+  let apiKey = '';
+  if (!keyless) apiKey = typed || (id ? getAgentApiKey(id) || '' : '');
   return { id, config, typed: keyless ? '' : typed, apiKey, keyless };
 }
 
@@ -1078,7 +1124,7 @@ export async function forgetProviderAuth(cfgModOrProvider, maybeProvider, reques
       throw new TypeError('Account is no longer connected.');
     }
     const result = withProviderAccount(id, accountId, () => oauth.forget());
-    const pool = removeProviderAccount(id, accountId);
+    const pool = await removeProviderAccount(id, accountId);
     if (cfgMod) updateConfigProvider(cfgMod, id, { enabled: pool.accounts.length > 0 });
     return { provider: id, type: 'oauth', forgotten: true, removed: Boolean(result?.removed) };
   }

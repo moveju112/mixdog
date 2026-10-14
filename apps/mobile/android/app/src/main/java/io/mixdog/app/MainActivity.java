@@ -10,15 +10,21 @@ import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
-import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+  // One back press closes exactly one web layer: while that layer's
+  // history.back() traversal is still in flight, history.state still shows
+  // the popped sentinel, so a quick second press is swallowed instead of
+  // traversing past the last sentinel. The timer only unsticks a lost echo.
   private static final String BACK_SCRIPT =
-      "(function(){if(history.state&&history.state.mixdogBack){history.back();return 'web'}"
+      "(function(){var w=window;if(w.__mixdogBackBusy)return 'web';"
+          + "if(history.state&&history.state.mixdogBack){w.__mixdogBackBusy=true;"
+          + "var done=function(){w.__mixdogBackBusy=false};"
+          + "w.addEventListener('popstate',done,{once:true});setTimeout(done,1000);"
+          + "history.back();return 'web'}"
           + "return location.origin==='https://localhost'?'local':'none'})()";
 
   private MixdogNativeHost nativeHost;
@@ -137,18 +143,4 @@ public class MainActivity extends BridgeActivity {
     intent.removeExtra(MixdogNotifications.EXTRA_ACTION);
   }
 
-  // [FORK:F002] 시작 — 하단 내비게이션 바를 항상 표시 (전체화면 해제)
-  // 원본: 내비게이션 바를 숨기고 가장자리 스와이프 때만 잠시 표시 (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)
-  // 포크: 포커스를 얻을 때마다 내비게이션 바를 표시
-  // 이유: 숨김 상태에서는 위로 두 번 쓸어야 홈으로 나가져서 한 번의 제스처로 나가도록 함
-  // 원본 동일 수정 시: 원본 채택 — 원본도 내비게이션 바를 항상 보이게 바꾸면 이 블록 퇴역
-  @Override
-  public void onWindowFocusChanged(boolean hasFocus) {
-    super.onWindowFocusChanged(hasFocus);
-    if (!hasFocus) return;
-    WindowInsetsControllerCompat controller =
-        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
-    controller.show(WindowInsetsCompat.Type.navigationBars());
-  }
-  // [FORK:F002] 끝
 }

@@ -1,20 +1,15 @@
 import { X } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { registerMobileBack } from '../mobile-back';
 import { OpenSelect } from '../OpenSelect';
-import { modelDisplayName, providerDisplayName } from '../provider-display';
-import { record } from '../record-utils';
-// biome-ignore format: @ts-expect-error must precede the specifier
-// @ts-expect-error Shared presentation contract has no separate declaration file.
-import { contextMeasurementStats, measuredContextUsage, contextMeasurementLabel } from '../../../../../src/ui/context-measurement.mjs';
 // The primitives render their string props literally. Call sites localize
 // app-authored copy with t(...); custom names and content stay untouched.
 import { t } from '../i18n';
-import { ErrorNotice } from '../ErrorNotice';
 import { acquireTitleBarDim } from '../titlebar-dim';
 
-import { count, type SettingsConfirmation } from './capability-data';
+import type { SettingsConfirmation } from './capability-data';
 
 export function Group({
   title,
@@ -63,15 +58,14 @@ export function ToggleRow({
   optimistic?: boolean;
   onChange(value: boolean): void;
 }) {
-  const displayTitle = title;
   return (
     <div className="mixdog-settings__row">
       <div className="mixdog-settings__copy">
-        <span className="mixdog-settings__row-title">{displayTitle}</span>
+        <span className="mixdog-settings__row-title">{title}</span>
       </div>
       <div className="settings-row-control">
         <CompactSwitch
-          label={displayTitle}
+          label={title}
           checked={checked}
           disabled={disabled}
           optimistic={optimistic}
@@ -147,16 +141,15 @@ export function SelectRow({
   const normalized = options.some((entry) => entry.value === value)
     ? options
     : [{ value, label: value || t('Select…') }, ...options];
-  const displayTitle = title;
   return (
     <div className="mixdog-settings__row">
       <div className="mixdog-settings__copy">
-        <span className="mixdog-settings__row-title">{displayTitle}</span>
+        <span className="mixdog-settings__row-title">{title}</span>
       </div>
       <div className="settings-row-control">
         <OpenSelect
           className="settings-select"
-          ariaLabel={displayTitle}
+          ariaLabel={title}
           value={value}
           disabled={disabled}
           options={normalized}
@@ -191,17 +184,16 @@ export function AutoSaveRow({
     if (required && !input.reportValidity()) return;
     onSave(input.value);
   };
-  const displayTitle = title;
   return (
     <div className="settings-form-row">
       <div>
-        <b>{displayTitle}</b>
+        <b>{title}</b>
       </div>
       <div className="settings-form-controls">
         <input
           key={value}
           name={name}
-          aria-label={displayTitle}
+          aria-label={title}
           defaultValue={value}
           placeholder={placeholder}
           required={required}
@@ -242,7 +234,18 @@ export function ActionButton({
   );
 }
 
-export function SettingsConfirmDialog({ options, onClose }: { options: SettingsConfirmation; onClose(): void }) {
+export function SettingsConfirmDialog({
+  options,
+  onClose,
+  portal = false,
+}: {
+  options: SettingsConfirmation;
+  onClose(): void;
+  /** Render into document.body. A sidebar host must: the sidebar scroll's
+   *  fade mask and isolation clip a fixed layer to the sidebar, which left
+   *  only a dimmed sidebar with the dialog itself invisible. */
+  portal?: boolean;
+}) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
@@ -257,12 +260,18 @@ export function SettingsConfirmDialog({ options, onClose }: { options: SettingsC
     onClose();
     void options.onConfirm();
   };
-  return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: scrim click-to-dismiss; keyboard dismissal is the dialog's Escape handling.
+  const layer = (
+    // biome-ignore lint/a11y/noStaticElementInteractions: scrim click-to-dismiss; Escape closes it here unless the settings dialog's capture handler already did.
     <div
       className="settings-confirm-layer"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
       }}
     >
       <section
@@ -291,6 +300,7 @@ export function SettingsConfirmDialog({ options, onClose }: { options: SettingsC
       </section>
     </div>
   );
+  return portal ? createPortal(layer, document.body) : layer;
 }
 
 type SettingsStatusTone = 'positive' | 'warning' | 'danger' | 'neutral';
@@ -354,65 +364,6 @@ export function ResourceRow({
       <div className="settings-resource-control">
         {actions && <div className="settings-resource-actions">{actions}</div>}
       </div>
-    </div>
-  );
-}
-
-function MetricGrid({ items }: { items: Array<{ label: string; value: unknown; tone?: string }> }) {
-  const visible = items.filter((item) => item.value !== undefined && item.value !== null && item.value !== '');
-  if (!visible.length) return <Empty text={t('No status data available.')} />;
-  return (
-    <div className="settings-metric-grid">
-      {visible.map((item) => (
-        <div key={item.label} className={item.tone ? `tone-${item.tone}` : ''}>
-          <span>{item.label}</span>
-          <b>{String(item.value)}</b>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function ContextStatusView({ value }: { value: unknown }) {
-  const context = record(value);
-  const messages = record(context.messages);
-  const request = record(context.request);
-  const usage = record(context.usage);
-  if (context.error) return <ErrorNotice error={context.error} role="status" />;
-  const measured = measuredContextUsage({
-    stats: contextMeasurementStats(context),
-    contextWindow: context.effectiveContextWindow || context.contextWindow,
-  });
-  const { used, limit: window, percent } = measured;
-  return (
-    <div className="settings-status-stack">
-      <ResourceRow
-        title={`${
-          context.model ? modelDisplayName(String(context.model), String(context.provider || '')) : t('No model')
-        } · ${context.provider ? providerDisplayName(String(context.provider)) : t('No provider')}`}
-        description={String(context.cwd || t('No active project'))}
-        meta={String(context.toolMode || t('default tools'))}
-      />
-      {window > 0 && (
-        // biome-ignore lint/a11y/useAriaPropsSupportedByRole: the meter div keeps its label; the tag and role stay unchanged.
-        <div className="settings-context-meter" aria-label={t(contextMeasurementLabel(measured.source))}>
-          <span style={{ width: `${percent ?? 0}%` }} />
-          <small>
-            {t(contextMeasurementLabel(measured.source))} · {used == null ? '—' : count(used)} / {count(window)}
-            {percent == null ? '' : ` · ${percent}%`}
-          </small>
-        </div>
-      )}
-      <MetricGrid
-        items={[
-          { label: t('Free tokens'), value: used == null ? '—' : count(Math.max(0, window - used)) },
-          { label: t('Messages'), value: count(messages.total ?? messages.count) },
-          { label: t('Tool schema'), value: `${count(request.toolSchemaTokens)} ${t('tokens')}` },
-          { label: t('Request reserve'), value: `${count(request.reserveTokens)} ${t('tokens')}` },
-          { label: t('Last input'), value: `${count(usage.lastInputTokens)} ${t('tokens')}` },
-          { label: t('Last output'), value: `${count(usage.lastOutputTokens)} ${t('tokens')}` },
-        ]}
-      />
     </div>
   );
 }
