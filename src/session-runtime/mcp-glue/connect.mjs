@@ -26,11 +26,15 @@ export function createMcpConnect({
   const syncScopeRoot = () => mcpClient.setMcpScopeRoot?.(getMcpScopeId(), clean(getCurrentCwd?.()));
   // Abort the pending interactive OAuth login of one server's connect.
   const cancelMcpLogin = (name) => mcpClient.cancelMcpLogin?.(clean(name), scopeOptions());
+  // Answer it with the redirect URL pasted from the browser.
+  const completeMcpLogin = (name, callbackUrl) => mcpClient.completeMcpLogin(clean(name), callbackUrl, scopeOptions());
 
   // Connect/disconnect exactly one server in the live registry, leaving all
   // others untouched. Used by the enable/disable toggle so a single-server
-  // change never triggers a full disconnectAll()/reconnect freeze.
-  async function applyMcpServerConnection(name, enabled, servers = resolveEffectiveMcpServers().servers, interactive = false) {
+  // change never triggers a full disconnectAll()/reconnect freeze. Only an
+  // explicit sign-in passes `login` ({ openBrowser }): every other connect is
+  // non-interactive and reports a server that needs one as sign-in required.
+  async function applyMcpServerConnection(name, enabled, servers = resolveEffectiveMcpServers().servers, login = null) {
     const target = clean(name);
     if (!target) return;
     // Changing this server's state clears any stale failure record for it.
@@ -48,11 +52,16 @@ export function createMcpConnect({
     // between the close and the connect never resurrects the server.
     try {
       ensurePluginServerData(cfg);
-      await mcpClient.reconnectSingleMcpServer(getMcpScopeId(), target, cfg, { interactive });
+      await mcpClient.reconnectSingleMcpServer(
+        getMcpScopeId(),
+        target,
+        cfg,
+        login ? { interactive: true, openBrowser: login.openBrowser } : {}
+      );
     } catch (error) {
-      const failures = Array.isArray(error?.failures)
-        ? error.failures
-        : [{ name: target, msg: error?.message || String(error) }];
+      const failure = { name: target, msg: error?.message || String(error) };
+      if (error?.authRequired) failure.authRequired = true;
+      const failures = Array.isArray(error?.failures) ? error.failures : [failure];
       state.mcpFailures = [...(state.mcpFailures || []), ...failures];
     }
   }
@@ -74,7 +83,13 @@ export function createMcpConnect({
     ]);
   }
 
-  async function connectConfiguredMcp({ reset = false, only = null, enabled = true, reconcile = false, interactive = false } = {}) {
+  async function connectConfiguredMcp({
+    reset = false,
+    only = null,
+    enabled = true,
+    reconcile = false,
+    login = null,
+  } = {}) {
     if (envFlag('MIXDOG_DISABLE_MCP')) {
       ++state.mcpConnectGeneration;
       state.mcpFailures = [];
@@ -111,7 +126,7 @@ export function createMcpConnect({
         }
         if (gen !== state.mcpConnectGeneration) return;
         if (reconcile) await reconcileServers();
-        else await applyMcpServerConnection(only, enabled, undefined, interactive);
+        else await applyMcpServerConnection(only, enabled, undefined, login);
       })();
       state.mcpConnectInFlight = run;
       try {
@@ -152,7 +167,7 @@ export function createMcpConnect({
       if (Object.keys(servers).length === 0) return;
       try {
         for (const cfg of Object.values(servers)) if (cfg?.enabled !== false) ensurePluginServerData(cfg);
-        await mcpClient.connectMcpServers(servers, { ...scopeOptions(), interactive });
+        await mcpClient.connectMcpServers(servers, scopeOptions());
       } catch (error) {
         state.mcpFailures = Array.isArray(error?.failures)
           ? error.failures
@@ -194,23 +209,35 @@ export function createMcpConnect({
         budgetMs = Math.min(budgetMs, requestedMaxWaitMs);
       }
     }
-    // Swallow the in-flight rejection: failures are already captured in
-    // state.mcpFailures, and this gate must never reject the turn.
-    const settled = Promise.resolve(inFlight).catch(() => {});
     // Budget disabled (0/off) = no per-server startup timeout, so the connect
     // promise may never settle; never gate the turn on it — fall back to the
     // legacy fire-and-forget behavior (late servers use the deferred path).
     if (!(budgetMs > 0)) return;
     let timer = null;
+    let expired = false;
     const budget = new Promise((resolveBudget) => {
-      timer = setTimeout(resolveBudget, budgetMs);
+      timer = setTimeout(() => {
+        expired = true;
+        resolveBudget();
+      }, budgetMs);
     });
     try {
-      await Promise.race([settled, budget]);
+      // Follow replacement connects (a reconnect queued behind the captured
+      // run installs a new in-flight promise) inside ONE fixed deadline.
+      // Failures are already captured in state.mcpFailures, so rejections are
+      // swallowed: this gate must never reject the turn.
+      let current = inFlight;
+      while (current && !expired) {
+        await Promise.race([Promise.resolve(current).catch(() => {}), budget]);
+        if (expired) break;
+        // Let a queued reconnect install its promise before re-checking.
+        await Promise.race([new Promise((resolveTick) => setImmediate(resolveTick)), budget]);
+        current = state.mcpConnectInFlight;
+      }
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
 
-  return { connectConfiguredMcp, awaitInitialMcpConnect, cancelMcpLogin };
+  return { connectConfiguredMcp, awaitInitialMcpConnect, cancelMcpLogin, completeMcpLogin };
 }

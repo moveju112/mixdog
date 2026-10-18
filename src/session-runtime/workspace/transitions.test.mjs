@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { createWorkspaceTransitions } from './transitions.mjs';
 import {
@@ -16,11 +16,15 @@ import {
   workspaceCwdLock,
 } from './admission-gate.mjs';
 import { worktreeError } from '../../runtime/shared/worktrees/contract.mjs';
+import {
+  refreshSessionWorkspaceContext,
+  snapshotPendingWorkspaceNotice,
+} from '../../runtime/agent/orchestrator/session/manager/prompt-utils.mjs';
 
 const BASE = 'a'.repeat(40);
 let counter = 0;
 
-function harness({ intent, sessionMessages = [], live = [], config = null } = {}) {
+function harness({ intent, sessionMessages = [], live = [], config = null, refresh = null, planSetup = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'mixdog-workspace-'));
   const project = join(root, 'project');
   const worktree = join(root, 'worktrees', 'fix');
@@ -59,6 +63,26 @@ function harness({ intent, sessionMessages = [], live = [], config = null } = {}
   };
   const manager = {
     createImpl: null,
+    async findWorktreeContaining() {
+      return state.retained;
+    },
+    async resolveBranchWorkspace(input) {
+      calls.push(['resolveBranch', input]);
+      if (manager.checkoutGate) await manager.checkoutGate;
+      const retained = state.retained?.branch === input.branch ? state.retained : null;
+      if (retained) {
+        if (retained.repoCommonDir !== entry.repoCommonDir) throw worktreeError('WORKTREE_PROJECT_MISMATCH');
+        await manager.claimWorktreeOwner(retained.id, { sessionId: input.sessionId });
+      }
+      const projectInfo = state.inspect?.(input.projectPath);
+      const path =
+        retained?.path ??
+        (input.branch === state.projectBranch
+          ? (projectInfo?.topLevel ?? input.projectPath)
+          : join(root, 'branches', input.branch));
+      mkdirSync(path, { recursive: true });
+      return { path, branch: input.branch, entry: retained, repoCommonDir: entry.repoCommonDir };
+    },
     async getSessionWorktree(id) {
       calls.push(['getSessionWorktree', id]);
       return state.retained;
@@ -90,10 +114,6 @@ function harness({ intent, sessionMessages = [], live = [], config = null } = {}
         retainedWorktree: state.retained,
       };
     },
-    async mergeWorktreeIntoProject(input) {
-      calls.push(['merge', input]);
-      return { merged: true };
-    },
     async assertWorktreeRemovable(input) {
       calls.push(['removable', input]);
       if (manager.removableImpl) await manager.removableImpl(input);
@@ -110,16 +130,30 @@ function harness({ intent, sessionMessages = [], live = [], config = null } = {}
     getCurrentCwd: () => state.cwd,
     getDesktopSession: () => session.desktopSession,
     getConfig: () => config,
-    applyResolvedCwd: (cwd) => {
-      calls.push(['applyCwd', cwd]);
+    applyResolvedCwd: (cwd, options) => {
+      calls.push(['applyCwd', cwd, ...(options ? [options] : [])]);
       state.cwd = cwd;
       session.cwd = cwd;
+      // Stands in for cwd-apply's persistProjectSelection.
+      if (options?.persistProjectSelection) {
+        const desktop = { classification: 'project', projectPath: cwd };
+        session.desktopSession = desktop;
+        state.rtDesktop = desktop;
+      }
     },
-    persistSession: (target) => calls.push(['persist', target.id, target.workspace?.revision ?? null]),
-    refreshWorkspaceContext: async (target, cwd) => {
+    setDesktopSession: (next) => {
+      state.rtDesktop = next;
+    },
+    persistSession: async (target) => {
+      calls.push(['persist', target.id, target.workspace?.revision ?? null]);
+      if (state.persistFails?.(target)) throw new Error('session save failed');
+    },
+    refreshWorkspaceContext: async (target, cwd, move) => {
       calls.push(['refresh', target.id, cwd]);
+      if (state.refreshGate) await state.refreshGate;
       // Stands in for the prompt rewrite a real refresh performs.
-      target.bp3EnvironmentContext = `- Cwd ${cwd}`;
+      if (refresh) await refresh(target, cwd, move);
+      else target.bp3EnvironmentContext = `- Cwd ${cwd}`;
       if (state.refreshFails?.(target, cwd)) throw new Error('prompt refresh failed');
     },
     invalidateCaches: () => calls.push(['invalidate']),
@@ -132,7 +166,7 @@ function harness({ intent, sessionMessages = [], live = [], config = null } = {}
     },
     countOwnShellJobs: async (ids) => {
       calls.push(['shellJobs', ids]);
-      return state.shellJobs;
+      return state.shellJobsFor ? state.shellJobsFor(ids) : state.shellJobs;
     },
     listLiveSessions: () => live,
     findRegisteredProject: async (path) => (path === project ? project : null),
@@ -154,6 +188,7 @@ function harness({ intent, sessionMessages = [], live = [], config = null } = {}
       counter += 1;
       return `tx-${counter}`;
     },
+    ...(planSetup ? { planWorktreeSetup: planSetup } : {}),
   });
   const names = () => calls.map((call) => call[0]);
   const cleanup = () => rmSync(root, { recursive: true, force: true });
@@ -337,6 +372,292 @@ test('a New Task provisions its requested worktree before the first prompt is se
   }
 });
 
+test('moving a live session: the uncommitted-changes choice reaches the backend and the notice', async () => {
+  const other = { id: 'other-active', owner: 'user', cwd: null };
+  const h = harness({ live: [other] });
+  try {
+    const create = h.manager.createManagedWorktree;
+    h.manager.createManagedWorktree = async (input) => {
+      if (input.carryChanges === 'ask') {
+        h.calls.push(['create', input]);
+        throw worktreeError('WORKTREE_DIRTY_CHOICE', undefined, { count: 3 });
+      }
+      const entry = await create(input);
+      return { ...entry, changes: { mode: input.carryChanges === 'carry' ? 'carried' : 'left', count: 3 } };
+    };
+    await assert.rejects(h.api.requestWorktree({ provision: true }), (error) => {
+      assert.equal(error.code, 'WORKTREE_DIRTY_CHOICE');
+      assert.deepEqual(error.details, { count: 3 });
+      return true;
+    });
+    assert.equal(h.session.workspace, undefined, 'nothing moved');
+    assert.equal(await h.api.prepareTurnWorkspace({ submissionId: 'next' }), null, 'a refused move is not re-armed');
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'stash' }), TypeError);
+
+    // Busy: the Lead's own turn refuses before anything is examined.
+    h.state.activeTurns = 1;
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), {
+      code: 'WORKTREE_BUSY_JOBS',
+    });
+    h.state.activeTurns = 0;
+    // `carry` needs the project folder to itself; `leave` does not.
+    other.cwd = h.project;
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), (error) => {
+      assert.equal(error.code, 'WORKTREE_BUSY_JOBS');
+      assert.equal(error.details.reason, 'folder-in-use');
+      return true;
+    });
+    assert.deepEqual(
+      h.calls.filter((call) => call[0] === 'create').map((call) => call[1].carryChanges),
+      ['ask'],
+      'busy refusals never reach the backend'
+    );
+    const left = await h.api.requestWorktree({ provision: true, carryChanges: 'leave' });
+    assert.equal(left.pending, false);
+    assert.equal(left.workspace.cwd, h.worktree);
+    assert.deepEqual(left.changes, { mode: 'left', count: 3 });
+    assert.equal(h.calls.filter((call) => call[0] === 'create').at(-1)[1].carryChanges, 'leave');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a carried move holds the project folder and tells the model where its changes and paths went', async () => {
+  const h = harness({
+    sessionMessages: [
+      { role: 'user', content: 'edit src/app.js' },
+      { role: 'assistant', content: 'done' },
+    ],
+    refresh: async (target, cwd, move) => refreshSessionWorkspaceContext(target, { cwd, ...(move ? { move } : {}) }),
+  });
+  try {
+    const systemBefore = JSON.stringify(h.session.messages.filter((message) => message.role === 'system'));
+    h.manager.createManagedWorktree = async (input) => {
+      h.calls.push(['create', input]);
+      // The project folder is held while the changes move: another Lead's checkout cannot start.
+      assert.throws(() => holdCheckoutFolder('other-lead', h.project), { code: 'WORKTREE_BUSY_JOBS' });
+      h.state.retained = h.entry;
+      return { ...h.entry, changes: { mode: 'carried', count: 2 } };
+    };
+    const result = await h.api.requestWorktree({ provision: true, carryChanges: 'carry' });
+    assert.equal(h.calls.find((call) => call[0] === 'create')[1].carryChanges, 'carry');
+    assert.deepEqual(result.changes, { mode: 'carried', count: 2 });
+    assert.equal(h.session.cwd, h.worktree);
+    holdCheckoutFolder('other-lead', h.project)();
+    assert.equal(
+      JSON.stringify(h.session.messages.filter((message) => message.role === 'system')),
+      systemBefore,
+      'the system prompt is untouched'
+    );
+    const notice = snapshotPendingWorkspaceNotice(h.session).content;
+    assert.match(notice, /\nUncommitted changes were moved into the worktree; ignored files/);
+    assert.ok(notice.includes(`substitute ${h.worktree} for the project root ${h.project}`));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a never-moved session menu names its repository, and a detached checkout shows its commit', async () => {
+  const h = harness();
+  try {
+    const onBranch = await h.api.getBranchMenu();
+    assert.equal(onBranch.workspace.repoCommonDir, join(h.project, '.git'));
+    assert.equal(onBranch.workspace.branch, 'main');
+    assert.equal(onBranch.workspace.baseCommit, null);
+    h.state.projectBranch = null;
+    const detached = await h.api.getBranchMenu();
+    assert.equal(detached.workspace.repoCommonDir, join(h.project, '.git'));
+    assert.equal(detached.workspace.branch, null);
+    assert.equal(detached.workspace.baseCommit, BASE);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a carry keeps its recovery ref until the move is committed, and a later failure puts the changes back', async () => {
+  const h = harness();
+  try {
+    const carried = [];
+    h.manager.createManagedWorktree = async (input) => {
+      h.calls.push(['create', input]);
+      h.state.retained = h.entry;
+      return { ...h.entry, changes: { mode: 'carried', count: 2, recoveryRef: 'refs/mixdog/carry/fix-1' } };
+    };
+    h.manager.restoreCarriedChanges = async (input) => carried.push(['restore', input.recoveryRef]);
+    h.manager.dropCarryRecoveryRef = async (input) => carried.push(['drop', input.recoveryRef]);
+    h.state.refreshFails = (target) => target.id === h.session.id;
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), /prompt refresh failed/);
+    assert.equal(h.session.cwd, h.project, 'the session stays in the project folder');
+    assert.deepEqual(carried, [
+      ['restore', 'refs/mixdog/carry/fix-1'],
+      ['drop', 'refs/mixdog/carry/fix-1'],
+    ]);
+    assert.deepEqual(h.calls.find((call) => call[0] === 'remove')[1], { entryId: 'fix', force: true });
+
+    carried.length = 0;
+    h.state.refreshFails = null;
+    const moved = await h.api.requestWorktree({ provision: true, carryChanges: 'carry' });
+    assert.deepEqual(moved.changes, { mode: 'carried', count: 2 }, 'the ref is internal');
+    assert.deepEqual(carried, [['drop', 'refs/mixdog/carry/fix-1']], 'dropped only after the committed move');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a failed save of the move fails it: the recovery ref stays until the old state is back', async () => {
+  const h = harness();
+  try {
+    const carried = [];
+    h.manager.createManagedWorktree = async (input) => {
+      h.calls.push(['create', input]);
+      h.state.retained = h.entry;
+      return { ...h.entry, changes: { mode: 'carried', count: 2, recoveryRef: 'refs/mixdog/carry/fix-1' } };
+    };
+    let restoreFails = true;
+    h.manager.restoreCarriedChanges = async (input) => {
+      carried.push(['restore', input.recoveryRef]);
+      if (restoreFails) throw new Error('restore refused');
+    };
+    h.manager.dropCarryRecoveryRef = async (input) => carried.push(['drop', input.recoveryRef]);
+    // Only the save of the moved session fails; the rollback save lands.
+    h.state.persistFails = (target) => target.id === h.session.id && target.workspace?.worktreeId === 'fix';
+
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), /session save failed/);
+    assert.equal(h.session.cwd, h.project, 'the session is back in the project folder');
+    assert.equal(h.state.cwd, h.project);
+    assert.equal(h.session.workspace, undefined, 'the previous (never-moved) workspace is authoritative');
+    assert.deepEqual(carried, [['restore', 'refs/mixdog/carry/fix-1']], 'a refused restore keeps the recovery ref');
+    assert.ok(!h.calls.some((call) => call[0] === 'remove'), 'and the worktree holding the changes');
+    // The rollback save carries the previous workspace (revision 0) again.
+    assert.deepEqual(h.calls.filter((call) => call[0] === 'persist').at(-1), ['persist', h.session.id, 0]);
+
+    carried.length = 0;
+    restoreFails = false;
+    h.state.retained = null; // a fresh carry (the kept worktree would be re-entered instead)
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), /session save failed/);
+    assert.deepEqual(
+      carried,
+      [
+        ['restore', 'refs/mixdog/carry/fix-1'],
+        ['drop', 'refs/mixdog/carry/fix-1'],
+      ],
+      'the ref is dropped only once the changes are back'
+    );
+    assert.equal(h.session.cwd, h.project);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a failed worker save fails the move and every root goes back', async () => {
+  const worker = { id: 'worker-1', owner: 'agent', ownerSessionId: null, cwd: null, messages: [] };
+  const h = harness({ live: [worker] });
+  try {
+    worker.ownerSessionId = h.session.id;
+    worker.cwd = h.project;
+    h.state.persistFails = (target) => target.id === worker.id && target.cwd === h.worktree;
+    await assert.rejects(h.api.requestWorktree({ provision: true }), /session save failed/);
+    assert.equal(worker.cwd, h.project, 'the worker is back in the project folder');
+    assert.equal(h.session.cwd, h.project);
+    const persisted = h.calls.filter((call) => call[0] === 'persist');
+    assert.equal(persisted.filter((call) => call[1] === worker.id).length, 2, 'the worker rollback is saved');
+    assert.deepEqual(persisted.at(-1), ['persist', h.session.id, 0], 'and the Lead rollback, awaited');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a session that leaves its new worktree before the first turn never runs its setup elsewhere', async () => {
+  const plans = [];
+  const h = harness({
+    planSetup: async (input) => {
+      plans.push(input.worktreeDir);
+      return { notes: [], commands: [] };
+    },
+  });
+  try {
+    await h.api.requestWorktree({ provision: true, prompt: 'Fix it' });
+    assert.equal(h.session.cwd, h.worktree);
+    await h.api.selectBranch({ branch: 'main' });
+    assert.equal(h.session.cwd, h.project, 'back on the project-folder branch');
+
+    await h.api.prepareTurnWorkspace({ submissionId: 'turn-1', prompt: 'go' });
+    assert.deepEqual(plans, [], 'no setup runs in the project folder');
+    assert.equal(h.session.pendingSetupNotice, undefined);
+
+    await h.api.requestWorktree();
+    assert.equal(h.session.cwd, h.worktree, 're-entered the retained worktree');
+    await h.api.prepareTurnWorkspace({ submissionId: 'turn-2', prompt: 'again' });
+    assert.deepEqual(plans, [h.worktree], 'the deferred setup runs once the session is back in it');
+    await h.api.prepareTurnWorkspace({ submissionId: 'turn-3', prompt: 'more' });
+    assert.equal(plans.length, 1, 'once');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a branch switch that creates a managed worktree schedules its setup for the next turn', async () => {
+  const plans = [];
+  const h = harness({
+    planSetup: async (input) => {
+      plans.push([input.worktreeDir, input.mainDir]);
+      return { notes: ['prepared'], commands: [] };
+    },
+  });
+  try {
+    const original = h.manager.resolveBranchWorkspace;
+    h.manager.resolveBranchWorkspace = async (input) => {
+      const resolved = await original(input);
+      return {
+        ...resolved,
+        entry: { ...h.entry, id: 'branch-wt', path: resolved.path, branch: input.branch },
+        created: true,
+      };
+    };
+    const moved = await h.api.selectBranch({ branch: 'feature/new', create: true });
+    assert.equal(moved.created, undefined, 'internal metadata is not part of the result');
+    assert.deepEqual(plans, []);
+    await h.api.prepareTurnWorkspace({ submissionId: 'turn-1', prompt: 'go' });
+    assert.deepEqual(plans, [[h.session.cwd, h.project]]);
+    assert.ok(h.session.pendingSetupNotice, 'the preparation notice is queued');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a carry refuses while another session in the project folder owns a background shell, even idle', async () => {
+  const idle = { id: 'other-idle', owner: 'user', cwd: null };
+  const h = harness({ live: [idle] });
+  try {
+    idle.cwd = h.project;
+    h.state.shellJobs = 1;
+    await assert.rejects(h.api.requestWorktree({ provision: true, carryChanges: 'carry' }), (error) => {
+      // The Lead's own shells are counted first (assertLeadIdle); with them
+      // quiet, the idle session's shell still refuses the carry.
+      assert.equal(error.code, 'WORKTREE_BUSY_JOBS');
+      return true;
+    });
+    h.state.shellJobs = 0;
+    const counted = [];
+    const api = h.api;
+    h.calls.length = 0;
+    // Only the project-folder sharers' shells are running now.
+    const shellJobsFor = (ids) => (ids.includes('other-idle') ? 1 : 0);
+    h.state.shellJobsFor = shellJobsFor;
+    await assert.rejects(api.requestWorktree({ provision: true, carryChanges: 'carry' }), (error) => {
+      assert.equal(error.details.reason, 'folder-shell-jobs');
+      counted.push(error.details.shellJobs);
+      return true;
+    });
+    assert.deepEqual(counted, [1]);
+    assert.equal(h.names().includes('create'), false);
+    const left = await api.requestWorktree({ provision: true, carryChanges: 'leave' });
+    assert.equal(left.workspace.cwd, h.worktree, '`leave` never clears the folder, so it is allowed');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('a Project in a repository subfolder runs in the same subfolder of its worktree and back', async () => {
   const h = harness();
   try {
@@ -431,7 +752,7 @@ test('a detached checkout of the project folder refuses while another session wo
   }
 });
 
-test('checking out another branch in the shared project folder refuses while other sessions work there', async () => {
+test('selecting another branch moves only this session while other sessions work in the project folder', async () => {
   const live = [];
   const h = harness({ live });
   try {
@@ -439,17 +760,14 @@ test('checking out another branch in the shared project folder refuses while oth
       { id: 'other-active', cwd: join(h.project, 'src'), owner: 'user' },
       { id: 'other-idle', cwd: h.project, owner: 'user' }
     );
-    await assert.rejects(h.api.selectBranch({ branch: 'dev' }), (error) => {
-      assert.equal(error.code, 'WORKTREE_BUSY_JOBS');
-      assert.equal(error.details.reason, 'folder-in-use');
-      assert.deepEqual(error.details.sessions, ['other-active']);
-      return true;
-    });
+    const moved = await h.api.selectBranch({ branch: 'dev' });
+    assert.notEqual(moved.workspace.cwd, h.project);
+    assert.equal(h.state.projectBranch, 'main');
     assert.equal(h.names().includes('checkout'), false);
     // The checked-out branch itself needs no checkout, so others are unaffected.
     const same = await h.api.selectBranch({ branch: 'main' });
     assert.equal(h.names().includes('checkout'), false);
-    assert.equal(same.revision, 1);
+    assert.equal(same.revision, 2);
   } finally {
     h.cleanup();
   }
@@ -510,7 +828,6 @@ test('requestWorktree, mergeWorkspace and removeWorktree enforce expectedRevisio
       conflict(1, 2)
     );
     assert.equal(h.names().includes('merge'), false);
-    assert.equal((await h.api.mergeWorkspace({ confirmed: true, target: 'main', expectedRevision: 2 })).merged, true);
 
     // A stale removal leaves the worktree, the cwd and the record untouched.
     await assert.rejects(h.api.removeWorktree({ expectedRevision: 1 }), conflict(1, 2));
@@ -552,15 +869,13 @@ test('project branches return to the project folder, the retained worktree branc
     assert.equal(workspaceCwdLock([h.session.id]), null);
 
     const created = await h.api.selectBranch({ branch: 'feature/x', create: true });
-    assert.deepEqual(h.calls.find((call) => call[0] === 'checkout')[1], {
-      projectPath: h.project,
-      branch: 'feature/x',
-      create: true,
-    });
+    assert.equal(h.calls.find((call) => call[0] === 'resolveBranch' && call[1].branch === 'feature/x')[1].create, true);
+    assert.equal(h.names().includes('checkout'), false);
     assert.equal(created.workspace.branch, 'feature/x');
 
     const menu = await h.api.getBranchMenu();
-    assert.deepEqual(menu.workspace, h.session.workspace);
+    assert.equal(menu.workspace.cwd, h.session.workspace.cwd);
+    assert.equal(h.state.projectBranch, 'main');
     assert.equal(menu.retainedWorktree, h.entry);
     assert.deepEqual(h.calls.find((call) => call[0] === 'occupancy')[1], {
       projectPath: h.project,
@@ -583,7 +898,11 @@ test('removing a bound worktree returns to the project folder first, then remove
     assert.equal(removed.workspace.cwd, h.project);
     assert.equal(removed.workspace.worktreeId, null);
     assert.deepEqual(removed.removed, { removed: true });
-    assert.deepEqual(h.calls.find((call) => call[0] === 'remove')[1], { entryId: 'fix', force: true });
+    assert.deepEqual(h.calls.find((call) => call[0] === 'remove')[1], {
+      entryId: 'fix',
+      force: true,
+      sessionId: h.session.id,
+    });
   } finally {
     h.cleanup();
   }
@@ -623,23 +942,13 @@ test("every transition moves the Lead's pool row (enter, return, remove), and a 
   }
 });
 
-test('merge targets the project folder branch, needs confirmation and refuses while busy', async () => {
+test('merge needs confirmation and refuses while busy', async () => {
   const h = harness();
   try {
     h.state.retained = h.entry;
     await assert.rejects(h.api.mergeWorkspace({ target: 'main' }), { code: 'WORKTREE_CONFIRM_REQUIRED' });
-    await assert.rejects(h.api.mergeWorkspace({ confirmed: true, target: 'dev' }), {
-      code: 'WORKTREE_TARGET_MISMATCH',
-    });
     h.state.activeTurns = 1;
     await assert.rejects(h.api.mergeWorkspace({ confirmed: true, target: 'main' }), { code: 'WORKTREE_BUSY_JOBS' });
-    assert.deepEqual(await h.api.mergeWorkspace({ confirmed: true }, { ownTurn: true }), { merged: true });
-    assert.deepEqual(h.calls.find((call) => call[0] === 'merge')[1], {
-      entryId: 'fix',
-      target: 'main',
-      confirmed: true,
-      projectPath: h.project,
-    });
   } finally {
     h.cleanup();
   }
@@ -661,35 +970,6 @@ test('a retained worktree of another Project or repository is never merged into 
     assert.equal(h.names().includes('merge'), false, 'nothing was merged');
   } finally {
     h.cleanup();
-  }
-});
-
-test('merge with cleanup removes the merged worktree only when autoCleanup is on', async () => {
-  const off = harness({ config: { worktree: { autoCleanup: false } } });
-  try {
-    off.state.retained = off.entry;
-    await off.api.requestWorktree();
-    const kept = await off.api.mergeWorkspace({ confirmed: true, target: 'main', cleanup: true });
-    assert.deepEqual(kept.cleanup, { removed: false, reason: 'auto-cleanup-off' });
-    assert.equal(off.names().includes('remove'), false);
-    assert.equal(off.session.cwd, off.worktree);
-  } finally {
-    off.cleanup();
-  }
-  const on = harness({ config: { worktree: { autoCleanup: true } } });
-  try {
-    on.state.retained = on.entry;
-    await on.api.requestWorktree();
-    const cleaned = await on.api.mergeWorkspace({ confirmed: true, target: 'main', cleanup: true });
-    assert.deepEqual(cleaned.cleanup, { removed: true });
-    assert.equal(cleaned.workspace.cwd, on.project);
-    assert.deepEqual(on.calls.find((call) => call[0] === 'remove')[1], { entryId: 'fix', force: false });
-    // A plain merge never removes anything.
-    on.state.retained = on.entry;
-    const plain = await on.api.mergeWorkspace({ confirmed: true, target: 'main' });
-    assert.equal(plain.cleanup, undefined);
-  } finally {
-    on.cleanup();
   }
 });
 
@@ -729,50 +1009,12 @@ test('a partly failed removal is WORKTREE_REMOVAL_INCOMPLETE: the session stays 
   }
 });
 
-test('the dock merge is project-authorized, needs the confirmed target and holds the checkout', async () => {
+test('the dock merge is project-authorized', async () => {
   const h = harness();
   try {
-    h.manager.mergeBranchIntoProject = async (input) => {
-      h.calls.push(['mergeBranch', input]);
-      return { merged: true, commit: 'c0ffee', target: 'main' };
-    };
     await assert.rejects(
       h.api.mergeProjectBranch({ projectPath: join(h.project, '..', 'unregistered'), branch: 'dev', target: 'main' }),
       { code: 'WORKTREE_PROJECT_UNKNOWN' }
-    );
-    await assert.rejects(h.api.mergeProjectBranch({ projectPath: h.project, branch: 'dev', target: 'release' }), {
-      code: 'WORKTREE_TARGET_MISMATCH',
-    });
-    assert.equal(h.names().includes('mergeBranch'), false);
-    assert.deepEqual(await h.api.mergeProjectBranch({ projectPath: h.project, branch: 'dev', target: 'main' }), {
-      merged: true,
-      commit: 'c0ffee',
-      target: 'main',
-    });
-    assert.deepEqual(h.calls.find((call) => call[0] === 'mergeBranch')[1], {
-      projectPath: h.project,
-      source: 'dev',
-      target: 'main',
-      confirmed: true,
-    });
-  } finally {
-    h.cleanup();
-  }
-});
-
-test('the dock merge refuses while another session works in the checkout', async () => {
-  const other = { id: 'other-active', owner: 'user', cwd: null };
-  const h = harness({ live: [other] });
-  try {
-    other.cwd = h.project;
-    h.manager.mergeBranchIntoProject = async () => assert.fail('must not merge');
-    await assert.rejects(
-      h.api.mergeProjectBranch({ projectPath: h.project, branch: 'dev', target: 'main' }),
-      (error) => {
-        assert.equal(error.code, 'WORKTREE_BUSY_JOBS');
-        assert.equal(error.details.reason, 'folder-in-use');
-        return true;
-      }
     );
   } finally {
     h.cleanup();
@@ -946,7 +1188,7 @@ test('turn admission waits for an in-flight transition of its session, then hold
     // The admitted turn runs in the shared project folder: another session
     // cannot change that checkout under it until the turn settles.
     assert.throws(
-      () => holdCheckoutFolder('other-lead', h.project),
+      () => holdCheckoutFolder('other-lead', h.state.cwd),
       (error) => {
         assert.equal(error.code, 'WORKTREE_BUSY_JOBS');
         assert.equal(error.details.reason, 'folder-in-use');
@@ -1092,6 +1334,226 @@ test('a prompt refresh that fails after the cwd moved restores the previous work
   }
 });
 
+test('a transition stages tail notices without touching system prompts, and a rollback restores them exactly', async () => {
+  const conversation = [
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer' },
+  ];
+  const worker = { id: 'w-notice', owner: 'agent', ownerSessionId: null, cwd: null, bp3EnvSplit: true };
+  const refresh = (target, cwd) =>
+    refreshSessionWorkspaceContext(target, {
+      cwd,
+      environmentContext: `- Cwd: ${cwd} — the active Project root; relative paths and shell commands resolve here.`,
+      instructionFilesContext: `# Instruction Files\n\n## ${cwd}/AGENTS.md\n\nrule`,
+    });
+  const h = harness({ live: [worker], sessionMessages: conversation, refresh });
+  try {
+    worker.ownerSessionId = h.session.id;
+    worker.cwd = h.project;
+    worker.bp3EnvironmentContext = `- Cwd: ${h.project} — the active Project root; relative paths and shell commands resolve here.`;
+    worker.messages = [{ role: 'system', content: worker.bp3EnvironmentContext, cacheTier: 'env' }, ...conversation];
+    h.session.bp3EnvSplit = true;
+    h.session.bp3EnvironmentContext = '- Shell: test';
+    h.session.messages.splice(1, 0, {
+      role: 'system',
+      content: `# Session\nCwd: ${h.project}\n\n---\n\n- Shell: test`,
+      cacheTier: 'env',
+    });
+    const leadSystem = JSON.stringify(h.session.messages.filter((message) => message.role === 'system'));
+    const workerSystem = JSON.stringify(worker.messages.filter((message) => message.role === 'system'));
+    const systemOf = (target) => JSON.stringify(target.messages.filter((message) => message.role === 'system'));
+    h.state.retained = h.entry;
+    await h.api.requestWorktree();
+    assert.equal(systemOf(h.session), leadSystem, 'the Lead prompt stays byte-identical');
+    assert.equal(systemOf(worker), workerSystem, 'the worker prompt stays byte-identical');
+    for (const target of [h.session, worker]) {
+      const notice = snapshotPendingWorkspaceNotice(target).content;
+      assert.ok(notice.includes(`The working folder is now ${h.worktree}.`));
+      assert.ok(notice.includes(`## ${h.worktree}/AGENTS.md`));
+    }
+    const leadStaged = h.session.workspaceReroot;
+    const workerStaged = worker.workspaceReroot;
+
+    // A removal that fails after the session left: both staged changes are put back exactly.
+    h.manager.removeImpl = async () => {
+      throw new Error('EBUSY: worktree locked');
+    };
+    await assert.rejects(h.api.removeWorktree({ force: true }), /EBUSY/);
+    assert.equal(h.session.workspaceReroot, leadStaged);
+    assert.equal(worker.workspaceReroot, workerStaged);
+    assert.equal(systemOf(h.session), leadSystem);
+    assert.equal(systemOf(worker), workerSystem);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a transition that rolls back removes the notice it staged', async () => {
+  const conversation = [
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer' },
+  ];
+  const worker = { id: 'w-notice-fail', owner: 'agent', ownerSessionId: null, cwd: null, messages: [...conversation] };
+  const h = harness({
+    live: [worker],
+    sessionMessages: conversation,
+    refresh: (target, cwd) => refreshSessionWorkspaceContext(target, { cwd }),
+  });
+  try {
+    worker.ownerSessionId = h.session.id;
+    worker.cwd = h.project;
+    h.session.messages.splice(1, 0, { role: 'system', content: `# Session\nCwd: ${h.project}`, cacheTier: 'env' });
+    const before = JSON.stringify(h.session.messages);
+    h.state.retained = h.entry;
+    // The Lead stages its notice, then the worker's refresh fails.
+    h.state.refreshFails = (target) => target.id === worker.id;
+    await assert.rejects(h.api.requestWorktree(), /prompt refresh failed/);
+    assert.equal(Object.hasOwn(h.session, 'workspaceReroot'), false, 'the staged notice is gone');
+    assert.equal(Object.hasOwn(worker, 'workspaceReroot'), false);
+    assert.equal(snapshotPendingWorkspaceNotice(h.session), null);
+    assert.equal(JSON.stringify(h.session.messages), before);
+  } finally {
+    h.cleanup();
+  }
+});
+
+function projectSwitchHarness() {
+  const conversation = [
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer' },
+  ];
+  const worker = { id: 'w-switch', owner: 'agent', ownerSessionId: null, cwd: null, messages: [...conversation] };
+  const h = harness({
+    live: [worker],
+    sessionMessages: conversation,
+    refresh: (target, cwd) =>
+      refreshSessionWorkspaceContext(target, {
+        cwd,
+        instructionFilesContext: `# Instruction Files\n\n## ${cwd}/AGENTS.md\n\nrule`,
+      }),
+  });
+  worker.ownerSessionId = h.session.id;
+  worker.cwd = h.project;
+  h.session.messages.splice(1, 0, { role: 'system', content: `# Session\nCwd: ${h.project}`, cacheTier: 'env' });
+  const other = join(dirname(h.project), 'other');
+  const third = join(dirname(h.project), 'third');
+  mkdirSync(other);
+  mkdirSync(third);
+  return { ...h, worker, other, third };
+}
+
+test('a Project switch moves the Lead and its idle workers and stages their notices before it resolves', async () => {
+  const h = projectSwitchHarness();
+  try {
+    const leadSystem = JSON.stringify(h.session.messages.filter((message) => message.role === 'system'));
+    assert.equal(await h.api.switchProject(h.other), h.other);
+    assert.deepEqual(
+      h.calls.find((call) => call[0] === 'applyCwd'),
+      ['applyCwd', h.other, { persistProjectSelection: true, classifyByMembership: false }]
+    );
+    assert.equal(h.session.cwd, h.other);
+    assert.deepEqual(h.session.desktopSession, { classification: 'project', projectPath: h.other });
+    assert.equal(h.worker.cwd, h.other, 'a reused worker runs in the new Project');
+    assert.deepEqual(h.state.leadRows.at(-1), [h.session.id, h.other]);
+    for (const target of [h.session, h.worker]) {
+      assert.ok(snapshotPendingWorkspaceNotice(target).content.includes(`The working folder is now ${h.other}.`));
+    }
+    assert.equal(
+      JSON.stringify(h.session.messages.filter((message) => message.role === 'system')),
+      leadSystem,
+      'the system prompt is untouched'
+    );
+    assert.ok(h.calls.some((call) => call[0] === 'refresh' && call[1] === h.worker.id && call[2] === h.other));
+
+    // A turn that arrives during a switch is admitted only once the prompt
+    // refresh landed.
+    let release;
+    h.state.refreshGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const order = [];
+    const switching = h.api.switchProject(h.third).then(() => order.push('switched'));
+    const admitted = h.api.admitTurnWorkspace().then((leave) => {
+      order.push('admitted');
+      leave();
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, [], 'the turn waits for the switch');
+    release();
+    await Promise.all([switching, admitted]);
+    assert.deepEqual(order.sort(), ['admitted', 'switched']);
+    assert.equal(h.session.cwd, h.third);
+    assert.ok(snapshotPendingWorkspaceNotice(h.session).content.includes(`The working folder is now ${h.third}.`));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a Project switch whose prompt refresh fails is rolled back and rejects', async () => {
+  const h = projectSwitchHarness();
+  try {
+    await h.api.switchProject(h.other);
+    const state = (target) => JSON.stringify({ ...target, updatedAt: null });
+    const before = {
+      lead: state(h.session),
+      worker: state(h.worker),
+      desktop: h.state.rtDesktop,
+      reroot: h.session.workspaceReroot,
+    };
+    h.state.refreshFails = (target) => target.id === h.worker.id;
+    await assert.rejects(h.api.switchProject(h.third), /prompt refresh failed/);
+    assert.equal(h.state.cwd, h.other);
+    assert.equal(state(h.session), before.lead, 'cwd, record, desktop metadata and notice restored');
+    assert.equal(h.session.workspaceReroot, before.reroot);
+    assert.equal(state(h.worker), before.worker);
+    assert.equal(h.state.rtDesktop, before.desktop);
+    assert.deepEqual(h.state.leadRows.at(-1), [h.session.id, h.other]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('a Project switch is refused from outside a running turn, while workers run, and inside a managed worktree', async () => {
+  const h = projectSwitchHarness();
+  try {
+    h.state.activeTurns = 1;
+    await assert.rejects(h.api.switchProject(h.other), { code: 'WORKTREE_BUSY_JOBS', details: { reason: 'turn' } });
+    assert.equal(h.names().includes('applyCwd'), false);
+    // The Lead's own tool call tolerates its calling turn.
+    assert.equal(await h.api.switchProject(h.other, { ownTurn: true }), h.other);
+    h.state.activeTurns = 0;
+
+    h.state.workers = [{ sessionId: h.worker.id, status: 'running' }];
+    await assert.rejects(h.api.switchProject(h.third, { ownTurn: true }), {
+      code: 'WORKTREE_BUSY_JOBS',
+      details: { reason: 'workers', workers: 1, jobs: 0 },
+    });
+    h.state.workers = [];
+    // Background shells do not pin the Project.
+    h.state.shellJobs = 2;
+    assert.equal(await h.api.switchProject(h.project, { classifyByMembership: true }), h.project);
+    assert.deepEqual(
+      h.calls.filter((call) => call[0] === 'applyCwd').at(-1),
+      ['applyCwd', h.project, { persistProjectSelection: true, classifyByMembership: true }],
+      'the desktop/remote move classifies by Project membership'
+    );
+    h.state.shellJobs = 0;
+
+    h.state.retained = h.entry;
+    await h.api.requestWorktree();
+    assert.equal(h.session.cwd, h.worktree);
+    const applied = h.names().filter((name) => name === 'applyCwd').length;
+    for (const ownTurn of [false, true]) {
+      await assert.rejects(h.api.switchProject(h.other, { ownTurn }), /managed worktree; exit the worktree first/);
+    }
+    assert.equal(h.names().filter((name) => name === 'applyCwd').length, applied, 'nothing moved');
+    assert.equal(h.session.cwd, h.worktree);
+    assert.equal(h.session.workspace.worktreeId, 'fix', 'the worktree binding is kept');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('session-less branch capabilities act only on a registered Project', async () => {
   const h = harness();
   try {
@@ -1162,15 +1624,15 @@ test('a session that never left the project folder shows the folder’s checked-
   }
 });
 
-test('a branch switch whose finalization fails switches the project folder back', async () => {
+test('a branch move whose finalization fails leaves the project checkout untouched', async () => {
   const h = harness();
   try {
     h.state.refreshFails = () => true;
     await assert.rejects(h.api.selectBranch({ branch: 'dev' }), /prompt refresh failed/);
     assert.deepEqual(
       h.calls.filter((call) => call[0] === 'checkout').map((call) => call[1].branch),
-      ['dev', 'main'],
-      'switched, then back'
+      [],
+      'no checkout was changed'
     );
     assert.equal(h.state.projectBranch, 'main');
     assert.equal(h.session.workspace, undefined);
@@ -1182,7 +1644,7 @@ test('a branch switch whose finalization fails switches the project folder back'
   }
 });
 
-test('a switch that cannot be put back reports WORKTREE_PARTIAL_TRANSITION and records the real checkout', async () => {
+test('a failed folder move does not need checkout rollback even when checkout would refuse', async () => {
   const h = harness();
   try {
     h.state.refreshFails = () => true;
@@ -1195,19 +1657,10 @@ test('a switch that cannot be put back reports WORKTREE_PARTIAL_TRANSITION and r
       h.state.projectBranch = input.branch;
       return { branch: input.branch, changed: true };
     };
-    await assert.rejects(h.api.selectBranch({ branch: 'dev' }), (error) => {
-      assert.equal(error.code, 'WORKTREE_PARTIAL_TRANSITION');
-      assert.equal(error.details.checkout, 'dev');
-      assert.equal(error.details.previousBranch, 'main');
-      assert.match(error.message, /now on "dev"/);
-      assert.match(error.details.revertReason, /uncommitted/);
-      return true;
-    });
-    assert.equal(h.state.projectBranch, 'dev');
-    assert.equal(h.session.workspace.branch, 'dev', 'the record matches the real checkout');
-    assert.equal(h.session.workspace.cwd, h.project);
-    assert.equal(h.session.workspace.transition.state, 'idle');
-    assert.equal(h.session.workspace.revision, 1);
+    await assert.rejects(h.api.selectBranch({ branch: 'dev' }), /prompt refresh failed/);
+    assert.equal(h.state.projectBranch, 'main');
+    assert.equal(h.session.workspace, undefined);
+    assert.equal(h.session.cwd, h.project);
   } finally {
     h.cleanup();
   }
@@ -1252,4 +1705,54 @@ test('the transition gate refuses overlap per Lead only', () => {
     leave();
   }
   beginWorkspaceTransition('lead-a', 'tx3')();
+});
+
+test('getLiveWorkspace: a project-folder session publishes HEAD facts, identity-stable; a worktree record stays as stored', (t) => {
+  const h = harness();
+  t.after(h.cleanup);
+  mkdirSync(join(h.project, '.git'), { recursive: true });
+  writeFileSync(join(h.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  assert.equal(h.api.getWorkspace(), null, 'the durable record is untouched');
+  const first = h.api.getLiveWorkspace();
+  assert.equal(first.branch, 'main');
+  assert.equal(first.cwd, h.project);
+  assert.equal(first.worktreeId, null);
+  assert.ok(first.repoCommonDir);
+  assert.equal(h.api.getLiveWorkspace(), first, 'identity-stable while unchanged');
+  writeFileSync(join(h.project, '.git', 'HEAD'), 'ref: refs/heads/dev\n');
+  assert.equal(h.api.getLiveWorkspace().branch, 'dev');
+  writeFileSync(join(h.project, '.git', 'HEAD'), `${BASE}\n`);
+  const detached = h.api.getLiveWorkspace();
+  assert.deepEqual([detached.branch, detached.baseCommit], [null, BASE]);
+  // A transition stub (no branch) gains the folder's facts and keeps its marker.
+  h.session.workspace = {
+    projectPath: h.project,
+    repoCommonDir: null,
+    cwd: h.project,
+    worktreeId: null,
+    branch: null,
+    baseCommit: null,
+    mergeTarget: null,
+    revision: 3,
+    transition: { state: 'switching', txId: 'tx-9' },
+  };
+  writeFileSync(join(h.project, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  const stub = h.api.getLiveWorkspace();
+  assert.deepEqual([stub.branch, stub.revision, stub.transition.state], ['main', 3, 'switching']);
+  assert.ok(stub.repoCommonDir);
+  const bound = {
+    ...stub,
+    worktreeId: 'fix',
+    branch: 'mixdog/fix',
+    cwd: h.worktree,
+    repoCommonDir: join(h.project, '.git'),
+  };
+  h.session.workspace = bound;
+  assert.equal(h.api.getLiveWorkspace(), bound);
+});
+
+test('getLiveWorkspace: outside a git repository a never-moved session publishes none', (t) => {
+  const h = harness();
+  t.after(h.cleanup);
+  assert.equal(h.api.getLiveWorkspace(), null);
 });

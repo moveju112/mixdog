@@ -138,6 +138,7 @@ export function renderAppView(ctx) {
       thinkingActiveSince={liveSpinner?.thinkingSegmentStartedAt ?? 0}
       thinkingMs={liveSpinner?.thinkingAccumulatedMs ?? 0}
       effort={state.effort || ''}
+      quiet={liveSpinner?.quiet ?? null}
       hasActiveTools={!!activeTools?.web_search?.count}
       paused={!!toolApproval}
       interruptible={!!(state.busy && state.spinner?.active)}
@@ -230,11 +231,12 @@ export function renderAppView(ctx) {
         ) : null}
         <StatusLine
           sessionId={state.sessionId}
-          clientHostPid={state.ownerClientHostPid || state.clientHostPid}
+          clientHostPid={state.clientHostPid}
           provider={state.provider}
           model={state.model}
           effort={state.effort}
           fast={state.fast}
+          ultra={state.fast === true && state.modelParameters?.serviceTier === 'ultrafast'}
           cwd={state.cwd}
           stats={statuslineStats}
           contextWindow={state.contextWindow}

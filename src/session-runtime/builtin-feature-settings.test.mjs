@@ -99,6 +99,15 @@ test('built-in Git and Office settings persist and refresh empty-session tools',
   assert.equal(state.refreshes(), 1);
 });
 
+test('AI session titles default on, persist the top-level key and report the same shape', () => {
+  const state = fixture();
+  assert.deepEqual(state.api.getSessionTitleSettings(), { aiSessionTitles: true });
+  assert.deepEqual(state.api.setAiSessionTitles(false), { aiSessionTitles: false });
+  assert.equal(state.config().aiSessionTitles, false);
+  assert.deepEqual(state.api.setAiSessionTitles(true), { aiSessionTitles: true });
+  assert.equal(state.config().aiSessionTitles, true);
+});
+
 test('instruction files mode defaults to all, validates, persists and refreshes empty-session tools', async () => {
   const state = fixture();
   assert.equal(state.api.getToolModuleSettings().instructionFiles, 'off');
@@ -218,9 +227,16 @@ test('built-in tool setting rejects names outside the first-party registry', asy
   const state = fixture();
   await assert.rejects(
     state.api.setBuiltinToolEnabled('shell', false),
-    /git, office, tidy, localProvider, autoEffort, or visualize/
+    /git, office, tidy, localProvider, autoEffort, visualize, or media/
   );
   assert.deepEqual(state.config(), {});
+});
+
+test('media generation is on by default and its switch persists as the media module flag', async () => {
+  const state = fixture();
+  assert.deepEqual(state.api.getToolModuleSettings().media, { enabled: true, installed: true });
+  assert.equal((await state.api.setBuiltinToolEnabled('media', false)).media.enabled, false);
+  assert.equal((await state.api.setBuiltinToolEnabled('media', true)).media.enabled, true);
 });
 
 test('tool module settings include memory model metadata even before activation', () => {

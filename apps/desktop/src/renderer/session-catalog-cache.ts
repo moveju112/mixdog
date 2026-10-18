@@ -1,6 +1,7 @@
 import type { DesktopSessionSummary } from '../shared/contract';
 import { catalogStorageKey, catalogStorageScope } from './catalog-storage-scope';
 import { deleteSessionImagePreviews } from './image-preview-store';
+import { contentLocalStorage } from './remote-conversation-privacy';
 
 const SESSION_CATALOG_STORAGE_KEY = 'mixdog.desktop-session-catalog.v1';
 const SESSION_CATALOG_LIMIT = 500;
@@ -32,6 +33,8 @@ function cachedSessionRow(value: unknown): DesktopSessionSummary | null {
   const sourceType = row.sourceType === 'schedule' || row.sourceType === 'webhook' ? row.sourceType : undefined;
   const sourceName = text(row.sourceName, 1_024);
   const activityAt = finiteNumber(row.activityAt, Number.NaN);
+  const createdAt = finiteNumber(row.createdAt, Number.NaN);
+  const inheritedFrom = text(row.inheritedFromSessionId, 256);
 
   return {
     id,
@@ -47,9 +50,10 @@ function cachedSessionRow(value: unknown): DesktopSessionSummary | null {
     // not show a dead worker as still running.
     ...(row.archived === true ? { archived: true } : {}),
     ...(row.favorite === true ? { favorite: true } : {}),
-    ...(typeof row.projectAssignment === 'string' ? { projectAssignment: text(row.projectAssignment, 32_768) } : {}),
     ...(sourceType ? { sourceType } : {}),
     ...(sourceName ? { sourceName } : {}),
+    ...(Number.isFinite(createdAt) && createdAt > 0 ? { createdAt } : {}),
+    ...(inheritedFrom ? { inheritedFromSessionId: inheritedFrom } : {}),
   };
 }
 
@@ -75,7 +79,7 @@ function normalizeCachedSessionCatalog(value: unknown): CachedSessionCatalog {
 
 export function readCachedSessionCatalog(): DesktopSessionSummary[] {
   try {
-    const stored = JSON.parse(window.localStorage.getItem(catalogStorageKey(SESSION_CATALOG_STORAGE_KEY)) || 'null');
+    const stored = JSON.parse(contentLocalStorage().getItem(catalogStorageKey(SESSION_CATALOG_STORAGE_KEY)) || 'null');
     return normalizeCachedSessionCatalog(stored).rows;
   } catch {
     return [];
@@ -89,7 +93,7 @@ export function writeCachedSessionCatalog(rows: DesktopSessionSummary[], scope =
     rows,
   });
   try {
-    window.localStorage.setItem(catalogStorageKey(SESSION_CATALOG_STORAGE_KEY, scope), JSON.stringify(catalog));
+    contentLocalStorage().setItem(catalogStorageKey(SESSION_CATALOG_STORAGE_KEY, scope), JSON.stringify(catalog));
   } catch {
     // The authoritative live catalog remains usable when storage is unavailable.
   }

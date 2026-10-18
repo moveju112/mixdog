@@ -154,7 +154,14 @@ test('a custom step effort is sent after its whole tool batch', async () => {
   const session = newSession(provider, model);
   const opts = appendTurn(session, provider, 'low');
   session.messages.push(
-    { role: 'assistant', content: '', toolCalls: [{ id: 'c1', name: 't', arguments: {} }, { id: 'c2', name: 't', arguments: {} }] },
+    {
+      role: 'assistant',
+      content: '',
+      toolCalls: [
+        { id: 'c1', name: 't', arguments: {} },
+        { id: 'c2', name: 't', arguments: {} },
+      ],
+    },
     { role: 'tool', toolCallId: 'c1', content: 'one' },
     {
       role: 'tool',
@@ -186,7 +193,13 @@ test('a custom model rejecting the update is replayed once with the per-request 
   const session = newSession(provider, model);
   await sendCompatResponses(provider, session.messages, model, [], appendTurn(session, provider, 'low'));
   session.messages.push({ role: 'assistant', content: 'a' });
-  const result = await sendCompatResponses(provider, session.messages, model, [], appendTurn(session, provider, 'high'));
+  const result = await sendCompatResponses(
+    provider,
+    session.messages,
+    model,
+    [],
+    appendTurn(session, provider, 'high')
+  );
   assert.equal(result.content, 'ok');
   assert.equal(requests.length, 3);
   assert.equal(updatesOf(requests[1].body).length, 1);
@@ -240,6 +253,11 @@ test('custom session identity: stable key and headers, caller headers win, hook 
 
   await sendCompatResponses(provider, messages, model, [], { ...SESSION, requestHeaders: { 'session-id': 'caller' } });
   assert.deepEqual(requests.at(-1).headers, { 'session-id': 'caller', 'x-client-request-id': 'sess-1' });
+  // A gateway route that opts into prompt_cache_key sends the key, not the session headers.
+  const gateway = fixture('opencode-go', model, { config: { responsesPromptCacheKey: true } });
+  await sendCompatResponses(gateway.provider, messages, model, [], SESSION);
+  assert.equal(gateway.requests.at(-1).body.prompt_cache_key, 'sess-1');
+  assert.equal(gateway.requests.at(-1).headers, undefined);
 
   const hooked = fixture('custom-g', model, {
     config: {

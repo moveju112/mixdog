@@ -14,6 +14,7 @@ import {
 } from './cursor-wire-protobuf.mjs';
 import {
   assertCursorUserImages,
+  createCursorCredentialRefresher,
   createCursorStreamWatchdog,
   resolveCursorStreamTuning,
   storeCursorBlob,
@@ -41,6 +42,7 @@ import {
 import { handleExecMessage, heartbeatFrame, sendToolResult } from './cursor-wire-exec.mjs';
 import { completionChunk, createStreamSink } from './cursor-wire-stream-sink.mjs';
 import { createBridgeController } from './cursor-wire-stream-bridge.mjs';
+import { TRANSPORT_SCOPE_DISPOSED } from './transport-scope.mjs';
 
 export { clearModelCache, getCursorModels, getCursorUsage } from './cursor-wire-models.mjs';
 
@@ -116,6 +118,8 @@ globalThis.__mixdogCloseProviderConnectionsForSession = (sessionId, reason) => {
     _priorCursorSessionCloseHook?.(sessionId, reason);
   } finally {
     closeCursorRunsForSession(sessionId, reason);
+    // A disposed transport scope never sends again: drop its conversation.
+    if (reason === TRANSPORT_SCOPE_DISPOSED && sessionId) conversations.delete(conversationKey([], sessionId));
   }
 };
 const _priorCursorDrainHook = globalThis.__mixdogDrainProviderConnections;
@@ -324,11 +328,12 @@ function createPendingToolBatchResponse(active, model, key) {
 }
 
 // Stream state shared by the sink, the message router and the bridge controller.
-function freshStreamState(sawTurnEnded) {
+function freshStreamState(sawTurnEnded, executions) {
   return {
     outputTokens: 0,
     contextTokens: null,
     pending: [],
+    executions,
     closed: false,
     sawEnd: false,
     sawTurnEnded: sawTurnEnded === true,
@@ -356,19 +361,25 @@ function createStreamResponse({
   // Owning session, carried into the stored run so a session close can find
   // and tear down the pending batch's bridge/heartbeat.
   sessionId = '',
+  ownerSessionId = sessionId,
   sawTurnEnded = false,
+  executions = new Map(),
   restart = null,
+  sleep = undefined,
+  onStageChange = null,
 }) {
   const id = newCompletionId();
   // The bridge currently feeding the stream; a restart swaps it in place.
   const live = { bridge, heartbeat };
   let watchdog = null;
   let cancelled = false;
+  // Cuts a pending retry backoff short when the caller cancels.
+  const cancelController = new AbortController();
   const runs = { get: (runKey) => activeRuns.get(runKey), store: storeActiveRun, forget: forgetActiveRun };
   const stream = new ReadableStream({
     start(controller) {
       const filter = thinkingFilter();
-      const state = freshStreamState(sawTurnEnded);
+      const state = freshStreamState(sawTurnEnded, executions);
       const tuning = resolveCursorStreamTuning();
       watchdog = createCursorStreamWatchdog({
         idleTimeoutMs: tuning.idleTimeoutMs,
@@ -392,15 +403,19 @@ function createStreamResponse({
         watchdog,
         sink,
         tuning,
-        run: { key, conversation, tools, cloudRule, modelParameters, maxMode, sessionId },
+        run: { key, conversation, tools, cloudRule, modelParameters, maxMode, sessionId, ownerSessionId },
         runs,
         restart,
+        sleep,
+        onStageChange,
+        cancelSignal: cancelController.signal,
         isCancelled: () => cancelled,
       });
       bridges.attach(bridge, heartbeat);
     },
     cancel(reason) {
       cancelled = true;
+      cancelController.abort();
       watchdog?.stop();
       clearInterval(live.heartbeat);
       const active = activeRuns.get(key);
@@ -437,6 +452,7 @@ function resumeRun(active, toolResults, userText, model, key) {
     }
     const payload = { ...result, content: String(result.content ?? '') };
     if (pendingUserText && pending.exec.execId === lastExecId) {
+      if (pending.native?.resultType === 'readResult') pending.nativeUserMessage = pendingUserText;
       payload.content += `\n\n<user_message>\n${pendingUserText}\n</user_message>`;
       userTextDelivered = true;
     }
@@ -459,7 +475,11 @@ function noUserMessageResponse() {
   });
 }
 
-export async function handleChatCompletion(body, accessToken) {
+export async function handleChatCompletion(
+  body,
+  accessToken,
+  { onStageChange = null, getAccessToken = null, resetActiveRun = false, ownerSessionId = '' } = {}
+) {
   await warmCursorClientVersion();
   const parsed = parseMessages(body.messages);
   if (
@@ -480,6 +500,7 @@ export async function handleChatCompletion(body, accessToken) {
   const cloudRule = parsed.systems.join('\n\n') || undefined;
   const active = activeRuns.get(key);
   if (
+    !resetActiveRun &&
     active &&
     parsed.toolResults.length &&
     active.bridge.alive &&
@@ -504,6 +525,10 @@ export async function handleChatCompletion(body, accessToken) {
   };
   const requestBytes = buildRunRequest(runInput);
   const { bridge, heartbeat } = startRun(accessToken, requestBytes);
+  // Every retry force-refreshes credentials and falls back to the previous
+  // token if the refresh fails. A rejected credential is only
+  // retried when the refresh produced a different token.
+  const credentials = createCursorCredentialRefresher(accessToken, getAccessToken);
   return createStreamResponse({
     bridge,
     heartbeat,
@@ -515,11 +540,22 @@ export async function handleChatCompletion(body, accessToken) {
     maxMode,
     key,
     sessionId,
-    restart: ({ fromCheckpoint }) =>
-      startRun(
-        accessToken,
-        fromCheckpoint ? buildRunRequest({ ...runInput, userText: '', userImages: [] }) : requestBytes
-      ),
+    ownerSessionId,
+    onStageChange,
+    restart: async ({ fromCheckpoint, reason, error }) => {
+      if (reason === 'throttle') {
+        // Cursor can pin resource_exhausted to one conversation id (conversation
+        // rotation after a rate limit): start a fresh one from the full
+        // history instead of the checkpoint it refused.
+        conversation.id = crypto.randomUUID();
+        conversation.checkpoint = null;
+      }
+      const token = await credentials.refresh(reason, error);
+      let bytes = requestBytes;
+      if (fromCheckpoint) bytes = buildRunRequest({ ...runInput, userText: '', userImages: [] });
+      else if (reason === 'throttle') bytes = buildRunRequest(runInput);
+      return startRun(token, bytes);
+    },
   });
 }
 

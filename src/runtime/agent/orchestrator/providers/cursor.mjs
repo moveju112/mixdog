@@ -10,7 +10,9 @@ import {
 } from './openai-compat-wire.mjs';
 import { preparePdfTextForProvider } from './media-normalization.mjs';
 import { consumeCompatChatCompletionStream } from './openai-compat-stream.mjs';
+import { retryAfterMsFromError } from './retry-classifier.mjs';
 import { ensureChatToolPairs } from './lib/wire-pairing.mjs';
+import { acceptedWireTools } from './lib/claude-bridge-schema.mjs';
 import { cursorTokenExpiry, exchangeCursorToken, resolveCursorOAuthAccessToken } from './cursor-auth.mjs';
 import {
   canonicalCursorModelId,
@@ -47,6 +49,7 @@ function toCursorMessages(messages, providerName, { nativePdf } = {}) {
       ...toolMessage,
       mixdog_tool_error: message.toolKind === 'error' || message.isError === true,
       ...(media.length ? { mixdog_tool_media: media } : {}),
+      ...(message.readWindow?.lineClipped === true ? { mixdog_read_window: { lineClipped: true } } : {}),
     });
   }
   return output;
@@ -62,14 +65,24 @@ function toCursorToolChoice(toolChoice) {
 async function responseError(response, label) {
   const text = await response.text().catch(() => '');
   let message = text;
+  let code = '';
   try {
     const parsed = JSON.parse(text);
     message = parsed?.error?.message || parsed?.message || text;
+    code = String(parsed?.error?.code || parsed?.code || '').toLowerCase();
   } catch {
     /* plain text */
   }
   const error = new Error(`${label} request failed (${response.status})${message ? `: ${message}` : ''}`);
   error.status = response.status;
+  error.httpStatus = response.status;
+  if (code) error.code = code;
+  const headers = Object.fromEntries(response.headers?.entries?.() ?? []);
+  if (Object.keys(headers).length) {
+    error.headers = headers;
+    const retryAfterMs = retryAfterMsFromError(error);
+    if (Number.isFinite(retryAfterMs)) error.retryAfterMs = retryAfterMs;
+  }
   throw error;
 }
 
@@ -533,8 +546,14 @@ function selectCursorVariant(group, { effort = null, fast = false } = {}) {
 class CursorProviderBase {
   // Cursor's chat wire has no document block: PDFs lower to text.
   nativePdf = false;
+  // Native read results are judged as exact source windows, so the tool
+  // finalizer reports their clipped lines next to the text.
+  consumesReadWindows = true;
 
   static inputExcludesCache = false;
+  // The in-place stream retry budget is the whole recovery: a spent budget
+  // surfaces instead of being re-run by the outer recovery cycles.
+  retryPolicy = Object.freeze({ recoveryCycles: false });
   name;
   config;
   _runtimeOverride;
@@ -622,7 +641,17 @@ class CursorProviderBase {
       sendOpts.onStageChange?.('requesting');
     } catch {}
     try {
-      const response = await runtime.handleChatCompletion(body, accessToken);
+      const response = await runtime.handleChatCompletion(body, accessToken, {
+        onStageChange: sendOpts.onStageChange,
+        getAccessToken: (options) => this._accessToken({ signal, ...options }),
+        // A deliberate history reset must reach Cursor's private parked run,
+        // not just the orchestrator's providerState.
+        resetActiveRun: Boolean(sendOpts.cacheBreakIntent),
+        // Native read/edit capabilities are process-local. An explicit empty
+        // executor (the model-proxy host: tools run in the server daemon)
+        // keeps every call an ordinary Mixdog tool call.
+        ownerSessionId: String(sendOpts.toolExecutionSessionId ?? (sendOpts.sessionId || '')),
+      });
       try {
         sendOpts.onStageChange?.('streaming');
       } catch {}
@@ -676,10 +705,18 @@ class CursorProviderBase {
     const runtime = await this._runtime();
     let accessToken = await this._accessToken({ signal });
     let cursorSelection = await this._resolveCursorModel(model, sendOpts, runtime, accessToken);
+    // The Cursor run and conversation (checkpoint, pending tool batch) live
+    // under this scope; a forked request keeps its own (transport-scope.mjs).
     const sessionScope = String(
-      sendOpts.sessionId || sendOpts.providerCacheKey || sendOpts.promptCacheKey || `cursor-call:${randomUUID()}`
+      sendOpts.transportScope ||
+        sendOpts.sessionId ||
+        sendOpts.providerCacheKey ||
+        sendOpts.promptCacheKey ||
+        `cursor-call:${randomUUID()}`
     );
-    const openAiTools = tools?.length ? toOpenAITools(tools) : undefined;
+    const openAiTools = tools?.length
+      ? toOpenAITools(acceptedWireTools(tools, 'openai', sendOpts.onToolExcluded, '[cursor] tool'))
+      : undefined;
     const dispatch = async () => {
       noteRequestServiceTier(cursorSelectionIsFast(cursorSelection) ? 'fast' : '');
       // Every attempt (retries included) prepares right before it lowers.

@@ -2,6 +2,7 @@
  * commands.mjs — the session object's long-running slash commands: memory
  * control, recall, doctor, and manual compaction (scheduled for turn end when
  * a turn is running). Each shows a command status while it holds the lock.
+ * /btw side questions (askSide/cancelSide) run beside them, lock-free.
  */
 import { compactEventDetail } from '../labels.mjs';
 import { archiveItemsForCompaction, compactionArchivedRows } from '../compaction-view.mjs';
@@ -92,34 +93,37 @@ export function createSessionCommandsApi(bag) {
     };
   };
 
+  // The explicit compaction pass, under a lock its caller holds.
+  async function runCompaction(startedAt) {
+    // Give Ink one event-loop turn to paint the compacting spinner before
+    // runtime.compact() starts synchronous session/transcript work (same
+    // yield as the auto-clear path; without it /compact looks frozen with
+    // no spinner until the compact already finished).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await runtime.compact({ recoverAgent: true });
+    const compactChanged = Boolean(result && !result.error && result.changed !== false);
+    syncContextStats({
+      allowEstimated: true,
+      invalidateExact: compactChanged,
+    });
+    set({ ...routeState(), stats: { ...getState().stats } });
+    if (compactChanged) {
+      // The compacted rows stay visible (archived) above the divider.
+      const { items } = archiveItemsForCompaction(getState().items, compactDoneItem(result, startedAt), null, {
+        archived: compactionArchivedRows(result),
+      });
+      set({ items: replaceItems(items, { preserveSpill: true }) });
+    } else {
+      pushItem(compactDoneItem(result, startedAt));
+    }
+    return result;
+  }
+
   async function compactCommand() {
     if (getState().commandBusy) return null;
     if (getState().busy) return scheduleCompactForTurnEnd(compactCommand);
     try {
-      return await withCommandStatus('Compacting conversation', 'compacting', async (startedAt) => {
-        // Give Ink one event-loop turn to paint the compacting spinner before
-        // runtime.compact() starts synchronous session/transcript work (same
-        // yield as the auto-clear path; without it /compact looks frozen with
-        // no spinner until the compact already finished).
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        const result = await runtime.compact({ recoverAgent: true });
-        const compactChanged = Boolean(result && !result.error && result.changed !== false);
-        syncContextStats({
-          allowEstimated: true,
-          invalidateExact: compactChanged,
-        });
-        set({ ...routeState(), stats: { ...getState().stats } });
-        if (compactChanged) {
-          // The compacted rows stay visible (archived) above the divider.
-          const { items } = archiveItemsForCompaction(getState().items, compactDoneItem(result, startedAt), null, {
-            archived: compactionArchivedRows(result),
-          });
-          set({ items: replaceItems(items, { preserveSpill: true }) });
-        } else {
-          pushItem(compactDoneItem(result, startedAt));
-        }
-        return result;
-      });
+      return await withCommandStatus('Compacting conversation', 'compacting', (startedAt) => runCompaction(startedAt));
     } finally {
       // A command reply reads the published snapshot, not the draft. Commit
       // completion before the awaiting service constructs that reply.
@@ -166,5 +170,14 @@ export function createSessionCommandsApi(bag) {
       });
     },
     compact: compactCommand,
+    // /btw: answered from the conversation so far while a turn keeps running.
+    // No command lock and no transcript row: the answer is only returned.
+    askSide: (question) => runtime.askSide(question),
+    // `sessionId` names the session the side question was asked in (it may
+    // no longer be the current one after a switch); omitted, the current one.
+    cancelSide: (sessionId) => {
+      if (typeof sessionId === 'string' && sessionId) runtime.cancelSide(sessionId);
+      else runtime.cancelSide();
+    },
   };
 }

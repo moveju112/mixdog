@@ -6,6 +6,7 @@ import { clean, hasOwn } from '../../runtime/agent/orchestrator/runtime-core/ses
 import { coerceEffortFor } from '../../runtime/agent/orchestrator/runtime-core/effort.mjs';
 import { ensureProviderEnabled } from '../../runtime/agent/orchestrator/runtime-core/config-helpers.mjs';
 import { selectionFastCapable } from '../route-state.mjs';
+import { routeChain } from '../../runtime/shared/model-route-chain.mjs';
 import {
   isDefaultWebSearchRouteConfig,
   isWebSearchCapableProvider,
@@ -62,7 +63,7 @@ export function createWebSearchRouteApi(deps) {
     await awaitKeychainPrewarm();
     ensureFullConfig();
     await ensureProvidersReady(ensureProviderEnabled(getConfig(), selectedRoute.provider));
-    const modelMeta = await lookupModelMeta(selectedRoute.provider, selectedRoute.model);
+    const modelMeta = await lookupModelMeta(selectedRoute.provider, selectedRoute.model, { allowFetch: true });
     if (!webSearchCapableFor(selectedRoute.provider, modelMeta)) {
       throw new Error(`model "${selectedRoute.model}" is not marked as web-search capable`);
     }
@@ -93,9 +94,13 @@ export function createWebSearchRouteApi(deps) {
       if (isDefaultWebSearchRouteConfig(selectedRoute)) {
         await awaitKeychainPrewarm();
         ensureFullConfig();
-        return saveWebSearchRoute(defaultWebSearchRoute(selectedRoute.toolType));
       }
-      return saveWebSearchRoute(await resolveExplicitRoute(selectedRoute));
+      const resolved = [];
+      for (const entry of routeChain(selectedRoute)) {
+        resolved.push(isDefaultWebSearchRouteConfig(entry) ? entry : await resolveExplicitRoute(entry));
+      }
+      const [primary, ...fallbacks] = resolved;
+      return saveWebSearchRoute(normalizeWebSearchRouteConfig({ ...primary, fallbacks }));
     },
   };
 }

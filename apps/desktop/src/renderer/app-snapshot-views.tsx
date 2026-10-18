@@ -15,7 +15,6 @@ import React, {
 import { InitialSurface } from './InitialSurface';
 
 import { beginBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
-import type { DesktopModelSelection } from '../shared/contract';
 import { Conversation } from './Conversation';
 import {
   desktopConversationShellSnapshotsEqual,
@@ -26,6 +25,7 @@ import {
 } from './desktop-snapshot-store';
 import { EMPTY_SNAPSHOT, type Snapshot, type TranscriptItem } from './desktop-types';
 import { PaneSurfaceCover } from './PaneSurfaceGate';
+import { useMobileRemoteSurface } from './mobile-surface';
 import { defaultSessionLaneStore, useSessionLane } from './session-lane-store';
 import { useSessionLaneRead } from './use-session-lane-read';
 import { requestSessionRead } from './session-read-request';
@@ -40,6 +40,7 @@ import {
   conversationPresentedSessionId,
   nextConversationOriginSessionId,
   conversationMarkdownPending,
+  conversationLaneIsEmpty,
 } from './first-submit-stability';
 import { readTranscriptVirtualSnapshot } from './transcript-virtual-cache';
 import { ContextUsageIndicator } from './transcript-status';
@@ -161,6 +162,7 @@ export const PaneConversation = memo(function PaneConversation({
   ...props
 }: PaneConversationProps) {
   const lane = useSessionLane(sessionId, defaultSessionLaneStore, desktopConversationShellSnapshotsEqual, !hidden);
+  const mobileSurface = useMobileRemoteSurface();
   const { readUnavailable, retryRead } = useSessionLaneRead({
     sessionId,
     hasLane: lane !== null,
@@ -258,6 +260,15 @@ export const PaneConversation = memo(function PaneConversation({
     setEnteredSessions((current) => (current.has(sessionKey) ? current : new Set(current).add(sessionKey)));
   }, []);
   const entryPending = !hidden && Boolean(sessionId) && !promotingFromDraft && !enteredSessions.has(sessionId);
+  // The timeline records an entry only after populated rows were revealed. A
+  // loaded lane with no rows has none to reveal, so it is entered as it lands.
+  const laneEmpty = !hidden && Boolean(sessionId) && !markdownPending && conversationLaneIsEmpty(lane);
+  useLayoutEffect(() => {
+    if (laneEmpty) onEntryRevealed(sessionId);
+  }, [laneEmpty, onEntryRevealed, sessionId]);
+  // The transcript is hidden while its reveal settles. A revisit latches the
+  // cover as already revealed, so the hidden transcript must hold it up.
+  const [transcriptHidden, setTranscriptHidden] = useState(false);
   // Only the conversation can declare its dock and row geometry ready.
   // A parallel timer would uncover a slow diff/Goal before its height lands.
   // Sidebar session registration remounts the virtualizer. Keep the sheet
@@ -302,12 +313,24 @@ export const PaneConversation = memo(function PaneConversation({
       <PaneContextIndicator
         sessionId={presentedSessionId}
         hidden={hidden}
-        onInherit={onInheritSession}
         onViewDetails={() => props.onOpenCommandSurface('context')}
       />
     ),
-    [hidden, onInheritSession, presentedSessionId, props.onOpenCommandSurface]
+    [hidden, presentedSessionId, props.onOpenCommandSurface]
   );
+  // A phone keeps its pane-sized cover (its skeleton draws its own composer
+  // bar); a wide pane covers the transcript viewport only, so the composer
+  // dock never disappears under a session switch.
+  const surfaceCover = (
+    <PaneSurfaceCover
+      ready={surfaceReady}
+      label={t('Loading conversation…')}
+      transitionKey={coverKey}
+      hold={transcriptHidden && !hidden}
+      skeleton={mobileSurface && Boolean(sessionId)}
+    />
+  );
+  const unavailable = readUnavailable && lane === null && !hidden;
   return (
     <>
       <Conversation
@@ -319,14 +342,16 @@ export const PaneConversation = memo(function PaneConversation({
         reviewActive={focused && !hidden}
         warmPaintHandoff={warmDraftHandoff}
         onEntryRevealed={onEntryRevealed}
+        onTranscriptHiddenChange={setTranscriptHidden}
         renderAssistantRow={(row) => <PaneAssistantRow {...row} sessionId={sessionId} hidden={hidden} />}
         {...props}
         onInheritSession={onInheritSession}
         submit={submit}
         goalIsland={<PaneGoalIsland sessionId={presentedSessionId} hidden={hidden} />}
         contextIndicator={contextIndicator}
+        transcriptCover={unavailable || mobileSurface ? undefined : surfaceCover}
       />
-      {readUnavailable && lane === null && !hidden ? (
+      {unavailable ? (
         <div className="pane-surface-cover session-unavailable" role="alert">
           <div className="session-unavailable-card">
             <strong>{t('Session unavailable')}</strong>
@@ -337,7 +362,7 @@ export const PaneConversation = memo(function PaneConversation({
           </div>
         </div>
       ) : (
-        <PaneSurfaceCover ready={surfaceReady} label={t('Loading conversation…')} transitionKey={coverKey} />
+        mobileSurface && surfaceCover
       )}
     </>
   );
@@ -443,16 +468,14 @@ export function PaneGoalIsland({ sessionId, hidden }: { sessionId: string; hidde
 export function PaneContextIndicator({
   sessionId,
   hidden,
-  onInherit,
   onViewDetails,
 }: {
   sessionId: string;
   hidden: boolean;
-  onInherit?: (sourceSessionId: string, route: DesktopModelSelection) => Promise<void>;
   onViewDetails?: () => void;
 }) {
   const visibleSnapshot = usePaneIslandSnapshot(sessionId, hidden);
-  return <ContextUsageIndicator snapshot={visibleSnapshot} onInherit={onInherit} onViewDetails={onViewDetails} />;
+  return <ContextUsageIndicator snapshot={visibleSnapshot} onViewDetails={onViewDetails} />;
 }
 
 type SnapshotUtilityDockProps = Omit<

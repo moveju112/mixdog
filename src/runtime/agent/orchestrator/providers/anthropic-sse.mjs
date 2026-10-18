@@ -75,9 +75,11 @@ const ANTHROPIC_SSE_ERROR_TYPE_STATUS = new Map([
   ['authentication_error', 401],
   ['permission_error', 403],
   ['not_found_error', 404],
+  ['conflict_error', 409],
   ['request_too_large', 413],
   ['rate_limit_error', 429],
   ['api_error', 500],
+  ['timeout_error', 504],
   ['overloaded_error', 529],
 ]);
 
@@ -109,6 +111,13 @@ function _anthropicSseError(event, labels) {
     err.httpStatus = status;
     err.status = status;
   }
+  // Provider-boundary contract: `code` is the lowercased Anthropic error type
+  // (an overload carries `overloaded_error` + 529, which the overload counter
+  // reads); an untyped `error` frame keeps the generic SSE code. A 413 is a
+  // byte-size refusal, never a prompt-token one.
+  const wireType = typeof type === 'string' ? type.trim().toLowerCase() : '';
+  if (status === 413) err.code = 'request_too_large';
+  else if (wireType && wireType !== 'error') err.code = wireType;
   // Wire-error marker: an error type OUTSIDE the documented enumeration
   // (no status resolved above) default-retries under the shared wire-error
   // contract instead of failing the turn as 'unknown'. Typed statuses and
@@ -162,7 +171,7 @@ function applyAnthropicSseEvent(framedEvent, { turn, watchdogs, state, progress,
         return false;
     }
   } catch (err) {
-    if (err?.code === 'EANTHROPIC_SSE_ERROR') throw err;
+    if (err?.name === 'AnthropicSseError') throw err;
     /* skip malformed events */
     return false;
   }

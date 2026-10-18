@@ -17,6 +17,7 @@ import { CapabilityIcon } from './CapabilityIcon';
 import { selectableComposerSkills, skillAvailable, skillTitle, type ComposerSkill } from './composer-skill';
 import { t } from './i18n';
 import { subscribeSetupChanges } from './setup-change-refresh';
+import { recognisedSlashSpan } from './slash-commands';
 import {
   isReservedMentionName,
   mentionedSkillNames,
@@ -96,20 +97,51 @@ export function cachedSkillCatalog(
 const startedReads = new Map<string, number>();
 const appliedReads = new Map<string, number>();
 
-export async function refreshSkillCatalog(
+// Concurrent reads of one catalog share a promise, and a catalog read within
+// SKILL_CATALOG_MIN_AGE_MS is served as is. A skill-changing signal passes
+// `force` to start a fresh read regardless (so it is never answered by one
+// that began before the change).
+export const SKILL_CATALOG_MIN_AGE_MS = 2000;
+const inflightReads = new Map<string, Promise<ComposerSkillCatalog>>();
+const readFinishedAt = new Map<string, number>();
+
+export function resetSkillCatalogReadsForTests(): void {
+  inflightReads.clear();
+  readFinishedAt.clear();
+}
+
+export function refreshSkillCatalog(
   sessionId?: string | null,
-  projectPath?: string | null
+  projectPath?: string | null,
+  options: { force?: boolean } = {}
 ): Promise<ComposerSkillCatalog> {
   const key = catalogKey(sessionId, projectPath);
+  if (!options.force) {
+    const inflight = inflightReads.get(key);
+    if (inflight) return inflight;
+    const cached = catalogs.get(key);
+    if (cached && Date.now() - (readFinishedAt.get(key) ?? 0) < SKILL_CATALOG_MIN_AGE_MS) {
+      return Promise.resolve(cached);
+    }
+  }
   const read = (startedReads.get(key) ?? 0) + 1;
   startedReads.set(key, read);
-  const next = composerSkillCatalog(await readSkillsStatus(sessionId, projectPath));
-  if (read > (appliedReads.get(key) ?? 0)) {
-    appliedReads.set(key, read);
-    catalogs.set(key, next);
-    for (const notify of catalogListeners) notify();
-  }
-  return catalogs.get(key) ?? next;
+  const promise = (async () => {
+    const next = composerSkillCatalog(await readSkillsStatus(sessionId, projectPath));
+    readFinishedAt.set(key, Date.now());
+    if (read > (appliedReads.get(key) ?? 0)) {
+      appliedReads.set(key, read);
+      catalogs.set(key, next);
+      for (const notify of catalogListeners) notify();
+    }
+    return catalogs.get(key) ?? next;
+  })();
+  inflightReads.set(key, promise);
+  const clear = () => {
+    if (inflightReads.get(key) === promise) inflightReads.delete(key);
+  };
+  promise.then(clear, clear);
+  return promise;
 }
 
 // Catalogs with a mounted composer, so one change re-reads each of them once
@@ -125,7 +157,7 @@ function refreshMountedCatalogs(): void {
     // A failed read leaves mentions unhighlighted (they still reach the
     // runtime, which resolves them); the + menu surfaces the read error.
     for (const { sessionId, projectPath } of mountedCatalogs.values()) {
-      void refreshSkillCatalog(sessionId, projectPath).catch(() => undefined);
+      void refreshSkillCatalog(sessionId, projectPath, { force: true }).catch(() => undefined);
     }
   });
 }
@@ -154,15 +186,13 @@ export function invalidateSkillCatalogForMutation(capability: string): boolean {
 }
 
 /** The catalog for a session, or (no session) for a new-task draft's
- *  `projectPath`. Re-read when `refreshKey` changes (the composer passes its
- *  focus state) and on every app signal that skills may have changed while it
- *  stays focused: a settings mutation, a setup-tool or host/other-client
- *  settings change, the window regaining focus (another window or app), and a
- *  remote reconnect or state gap. Never on keystrokes. */
+ *  `projectPath`. Read when the catalog changes and re-read on every app signal
+ *  that skills may have changed: a settings mutation, a setup-tool or
+ *  host/other-client settings change, and a remote reconnect or state gap.
+ *  Never on keystrokes or focus changes. */
 export function useSkillCatalog(
   sessionId: string | null | undefined,
-  projectPath: string | null | undefined,
-  refreshKey: unknown
+  projectPath: string | null | undefined
 ): ComposerSkillCatalog {
   const session = sessionId || '';
   const project = session ? '' : projectPath || '';
@@ -172,16 +202,14 @@ export function useSkillCatalog(
     () => catalogs.get(key) ?? EMPTY_CATALOG,
     () => EMPTY_CATALOG
   );
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is the re-read trigger; the body does not read it
   useEffect(() => {
     void refreshSkillCatalog(session, project).catch(() => undefined);
-  }, [session, project, refreshKey]);
+  }, [session, project]);
   useEffect(() => {
     const mounted = mountedCatalogs.get(key);
     if (mounted) mounted.count += 1;
     else mountedCatalogs.set(key, { sessionId: session, projectPath: project, count: 1 });
     const unsubscribeSetup = subscribeSetupChanges(refreshMountedCatalogs);
-    window.addEventListener('focus', refreshMountedCatalogs);
     window.addEventListener('mixdog:remote-state-gap', refreshMountedCatalogs);
     window.addEventListener('mixdog:remote-reconnected', refreshMountedCatalogs);
     return () => {
@@ -189,7 +217,6 @@ export function useSkillCatalog(
       if (entry && entry.count > 1) entry.count -= 1;
       else mountedCatalogs.delete(key);
       unsubscribeSetup();
-      window.removeEventListener('focus', refreshMountedCatalogs);
       window.removeEventListener('mixdog:remote-state-gap', refreshMountedCatalogs);
       window.removeEventListener('mixdog:remote-reconnected', refreshMountedCatalogs);
     };
@@ -231,18 +258,36 @@ export function skillMentionSegments(text: string, isSkill: (name: string) => bo
   return segments;
 }
 
+export type ComposerHighlightSegment = SkillMentionSegment & { slash?: boolean };
+
+/** `text` split into plain runs, recognised `$name` tokens and a recognised
+ *  leading `/command` (colour only; never changes the text). */
+export function composerHighlightSegments(
+  text: string,
+  isSkill: (name: string) => boolean
+): ComposerHighlightSegment[] {
+  const span = recognisedSlashSpan(text);
+  if (!span) return skillMentionSegments(text, isSkill);
+  const segments: ComposerHighlightSegment[] = [];
+  if (span.start > 0) segments.push({ text: text.slice(0, span.start) });
+  segments.push({ text: text.slice(span.start, span.end), slash: true });
+  const rest = text.slice(span.end);
+  if (rest) segments.push(...skillMentionSegments(rest, isSkill));
+  return segments;
+}
+
 /** Mentioned skills that exist but are switched off, in first-mention order. */
 export function disabledMentionedSkills(text: string, catalog: ComposerSkillCatalog): string[] {
   return mentionedSkillNames(text, (name) => catalog.disabled.has(name));
 }
 
-export function SkillMentionText({ text, isSkill }: { text: string; isSkill: (name: string) => boolean }) {
+function HighlightSegments({ segments }: { segments: ComposerHighlightSegment[] }) {
   return (
     <>
-      {skillMentionSegments(text, isSkill).map((segment, index) =>
-        segment.skill ? (
+      {segments.map((segment, index) =>
+        segment.skill || segment.slash ? (
           // biome-ignore lint/suspicious/noArrayIndexKey: segments are positional runs of one string
-          <span key={index} className="skill-mention-token">
+          <span key={index} className={segment.slash ? 'composer-slash-token' : 'skill-mention-token'}>
             {segment.text}
           </span>
         ) : (
@@ -252,6 +297,10 @@ export function SkillMentionText({ text, isSkill }: { text: string; isSkill: (na
       )}
     </>
   );
+}
+
+export function SkillMentionText({ text, isSkill }: { text: string; isSkill: (name: string) => boolean }) {
+  return <HighlightSegments segments={skillMentionSegments(text, isSkill)} />;
 }
 
 // Everything that decides where a glyph lands inside the textarea. The layer
@@ -339,7 +388,8 @@ export function useComposerSkillHighlight({
       element.removeEventListener('compositionend', end);
     };
   }, [textarea]);
-  const recognised = useMemo(() => skillMentions(text, isSkill).length > 0, [text, isSkill]);
+  const segments = useMemo(() => composerHighlightSegments(text, isSkill), [text, isSkill]);
+  const recognised = segments.some((segment) => segment.skill || segment.slash);
   const active = !disabled && !composing && recognised;
   // Every commit can move the box (autosize, scrollbar), so re-mirror on each.
   useLayoutEffect(() => {
@@ -365,7 +415,7 @@ export function useComposerSkillHighlight({
   }, [active, textarea]);
   const layer = active ? (
     <div ref={layerRef} className="composer-skill-highlight" aria-hidden="true">
-      <SkillMentionText text={text} isSkill={isSkill} />
+      <HighlightSegments segments={segments} />
       {/* A trailing newline still owns a line in the textarea. */}
       {'\u200b'}
     </div>

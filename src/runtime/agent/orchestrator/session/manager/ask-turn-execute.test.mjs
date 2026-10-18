@@ -1,0 +1,170 @@
+import assert from 'node:assert/strict';
+import test, { mock } from 'node:test';
+
+const events = [];
+let mockHistory = [];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const provider = {
+  config: {},
+  customConfig: { protocol: 'openai-chat' },
+  getCachedModelInfo: (id) => ({
+    id,
+    reasoningLevels: ['low', 'medium', 'high'],
+    customReasoning: { wireFormat: 'standard', wireValues: { high: 'H' }, replay: false },
+  }),
+};
+const JUDGE_MS = 80;
+const BUILD_MS = 80;
+
+mock.module('../../providers/registry.mjs', {
+  namedExports: { ...(await import('../../providers/registry.mjs')), getProvider: () => provider },
+});
+mock.module('./ask-turn-auto-effort.mjs', {
+  namedExports: {
+    ...(await import('./ask-turn-auto-effort.mjs')),
+    resolveTurnAutoEffort: async () => {
+      events.push('judge:start');
+      await sleep(JUDGE_MS);
+      events.push('judge:end');
+      return { effort: 'high', applied: true, mode: 'on', request: 'go', base: 'medium' };
+    },
+  },
+});
+mock.module('./ask-turn-prepare.mjs', {
+  namedExports: {
+    ...(await import('./ask-turn-prepare.mjs')),
+    applyTurnContextMeta: () => {},
+    traceTurnContext: () => {},
+    startProviderPrewarm: (args) => {
+      events.push(`prewarm:${args.turnEffort}`);
+      return null;
+    },
+    buildUserTurn: async () => {
+      events.push('build:start');
+      await sleep(BUILD_MS);
+      events.push('build:end');
+      const userTurnMessage = { role: 'user', content: 'go', meta: { runtimeUserContext: { prefix: '', suffix: 'x' } } };
+      const historyMessages = mockHistory.slice();
+      return {
+        historyMessages,
+        outgoing: [...historyMessages, userTurnMessage],
+        userTurnMessage,
+        explicitPrefetchResult: '',
+      };
+    },
+  },
+});
+mock.module('../store.mjs', {
+  namedExports: { ...(await import('../store.mjs')), saveSessionAsync: async () => {} },
+});
+
+const { prepareAskTurn } = await import('./ask-turn-execute.mjs');
+
+function turnFor(session) {
+  return {
+    turn: { session },
+    runtime: {},
+    turnSignal: new AbortController().signal,
+    askGeneration: 1,
+    checkpoint: { schedule() {} },
+    turnToken: 't',
+    startedAt: Date.now(),
+    codexTurnId: null,
+  };
+}
+
+test('the first human prompt names a titleless session; manual, generated and later prompts never overwrite', async () => {
+  const fresh = () => ({
+    provider: 'custom-a',
+    model: 'm',
+    effort: 'medium',
+    messages: [],
+    cwd: process.cwd(),
+    sessionStartMetaInjected: true,
+  });
+  const session = fresh();
+  await prepareAskTurn({ sessionId: 's2', opened: turnFor(session), input: { prompt: '  Fix the\nlogin bug ' } });
+  assert.equal(session.title, 'Fix the login bug');
+  assert.equal(session.generatedTitleStage, undefined);
+  assert.equal(session.titleLocked, undefined);
+  await prepareAskTurn({ sessionId: 's2', opened: turnFor(session), input: { prompt: 'another request' } });
+  assert.equal(session.title, 'Fix the login bug');
+
+  const manual = { ...fresh(), title: 'Mine', titleLocked: true, titleSource: 'user' };
+  await prepareAskTurn({ sessionId: 's3', opened: turnFor(manual), input: { prompt: 'something' } });
+  assert.equal(manual.title, 'Mine');
+
+  const generated = { ...fresh(), title: 'Generated', generatedTitleStage: 'first' };
+  await prepareAskTurn({ sessionId: 's4', opened: turnFor(generated), input: { prompt: 'something' } });
+  assert.equal(generated.title, 'Generated');
+
+  const injected = fresh();
+  await prepareAskTurn({
+    sessionId: 's5',
+    opened: turnFor(injected),
+    input: { prompt: 'task finished', promptSource: 'task-notification' },
+  });
+  assert.equal(injected.title, undefined);
+});
+
+test('an existing titleless session is named from its earliest human history, not the current prompt', async () => {
+  mockHistory = [
+    { role: 'user', content: 'Continue the goal', meta: { source: 'goal-continuation', synthetic: true } },
+    { role: 'user', content: 'Original request about caching' },
+    { role: 'assistant', content: 'working on it' },
+  ];
+  try {
+    const session = {
+      provider: 'custom-a',
+      model: 'm',
+      effort: 'medium',
+      messages: mockHistory.slice(),
+      cwd: process.cwd(),
+      sessionStartMetaInjected: true,
+    };
+    await prepareAskTurn({ sessionId: 's6', opened: turnFor(session), input: { prompt: 'a later question' } });
+    assert.equal(session.title, 'Original request about caching');
+
+    // With no human history, the current prompt is still the fallback.
+    mockHistory = [{ role: 'user', content: 'Continue', meta: { source: 'goal-continuation' } }];
+    const fresh = { ...session, title: undefined, messages: [] };
+    await prepareAskTurn({ sessionId: 's7', opened: turnFor(fresh), input: { prompt: 'a later question' } });
+    assert.equal(fresh.title, 'a later question');
+  } finally {
+    mockHistory = [];
+  }
+});
+
+test('turn start overlaps the judgment with buildUserTurn and still stamps the first request with it', async () => {
+  events.length = 0;
+  const session = {
+    provider: 'custom-a',
+    model: 'm',
+    effort: 'medium',
+    messages: [],
+    cwd: process.cwd(),
+    sessionStartMetaInjected: true,
+  };
+  const opened = {
+    turn: { session },
+    runtime: {},
+    turnSignal: new AbortController().signal,
+    askGeneration: 1,
+    checkpoint: { schedule() {} },
+    turnToken: 't1',
+    startedAt: Date.now(),
+    codexTurnId: null,
+  };
+  const startedAt = performance.now();
+  const prepared = await prepareAskTurn({ sessionId: 's1', opened, input: { prompt: 'go' }, transcriptMeta: null });
+  const elapsed = performance.now() - startedAt;
+
+  assert.deepEqual(events.slice(0, 3), ['judge:start', 'prewarm:medium', 'build:start']);
+  assert.ok(events.indexOf('build:start') < events.indexOf('judge:end'), 'build began before the judgment finished');
+  assert.ok(elapsed < JUDGE_MS + BUILD_MS - 30, `overlapped: ${elapsed} ms`);
+  assert.equal(prepared.turnEffort, 'high');
+  assert.equal(prepared.effortConfiguration.effort, 'high');
+  const message = prepared.outgoing[0];
+  assert.equal(message.meta.effortConfiguration.effort, 'high');
+  assert.deepEqual(Object.keys(message.meta), ['effortConfiguration', 'runtimeUserContext']);
+});

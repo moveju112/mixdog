@@ -93,6 +93,7 @@ async function run(): Promise<void> {
       },
     });
     host = createBrowserHost(parent, {
+      remoteSession: false,
       requestApproval: async () => true,
       chooseBrowserFiles: async () => ({ canceled: false, filePaths: [chosenFile] }),
     });
@@ -189,9 +190,7 @@ async function run(): Promise<void> {
     try {
       await eventually(async () => presented(), Boolean);
     } catch (error) {
-      log(
-        `not presented: last requests ${presentCalls.slice(-3).join(' ')}; view ${JSON.stringify(view.getBounds())}`
-      );
+      log(`not presented: last requests ${presentCalls.slice(-3).join(' ')}; view ${JSON.stringify(view.getBounds())}`);
       throw error;
     }
     const initialBounds = view.getBounds();
@@ -349,16 +348,13 @@ async function run(): Promise<void> {
     app.getAppMetrics();
     await pause(3000);
     const idleCpu = Object.fromEntries(
-      app
-        .getAppMetrics()
-        .map((metric) => [
-          metric.pid === shell.getOSProcessId()
-            ? 'shell'
-            : metric.pid === guest.getOSProcessId()
-              ? 'page'
-              : `${metric.type}${metric.pid === process.pid ? '(main)' : ''}`,
-          Math.round(metric.cpu.percentCPUUsage * 10) / 10,
-        ])
+      app.getAppMetrics().map((metric) => {
+        let label: string;
+        if (metric.pid === shell.getOSProcessId()) label = 'shell';
+        else if (metric.pid === guest.getOSProcessId()) label = 'page';
+        else label = `${metric.type}${metric.pid === process.pid ? '(main)' : ''}`;
+        return [label, Math.round(metric.cpu.percentCPUUsage * 10) / 10];
+      })
     );
     log(`idle presented pane cpu: ${JSON.stringify(idleCpu)}`);
 

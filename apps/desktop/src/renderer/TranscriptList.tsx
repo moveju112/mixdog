@@ -23,8 +23,6 @@ type TranscriptListProps = {
   rows: readonly TranscriptRowModel[];
   viewport: RefObject<HTMLDivElement | null>;
   content: MutableRefObject<HTMLDivElement | null>;
-  /** Measured overlay footprint, not a reduction of the scroll viewport. */
-  bottomInset?: number;
   shouldAnchorBottom: boolean;
   scrollToEndRef: MutableRefObject<(behavior?: ScrollBehavior) => void>;
   /** The follow hook flips the anchor here the instant it decides, without
@@ -57,7 +55,6 @@ export function TranscriptList({
   rows,
   viewport,
   content,
-  bottomInset = 0,
   shouldAnchorBottom: anchorBottomProp,
   scrollToEndRef,
   setAnchorBottomRef,
@@ -68,8 +65,6 @@ export function TranscriptList({
   onSelectionAutoScroll,
 }: TranscriptListProps) {
   const spacer = useRef<HTMLDivElement>(null);
-  const bottomInsetRef = useRef(bottomInset);
-  bottomInsetRef.current = bottomInset;
   // The viewport's scrollTop as last observed in a scroll event or written by
   // this list: every other consumer reads this instead of the DOM.
   const domTop = useRef<number | null>(null);
@@ -107,7 +102,6 @@ export function TranscriptList({
     activeIndexesRef,
     shouldAnchorBottom,
     initialMeasurements: restored?.measurements,
-    bottomInset,
     // Resolved at call time: the end pin is built below, from this instance.
     requestEndPin: () => endPin.request(),
     noteScrollOffset,
@@ -140,7 +134,6 @@ export function TranscriptList({
     hasScrollGestureRef,
     domTop,
     markProgrammaticScrollRef,
-    bottomInset,
     deviation,
   });
   const { laidOutRows, pendingAnchor, anchorHold, readingAnchorHeld, restoreReadingAnchor, queueAnchorRestore } =
@@ -171,7 +164,7 @@ export function TranscriptList({
     anchorHold,
     restoreReadingAnchor,
   });
-  useVirtualizerResizePatch({
+  const { settleHeldShrinks } = useVirtualizerResizePatch({
     virtualizer,
     viewport,
     hasScrollGestureRef,
@@ -188,13 +181,25 @@ export function TranscriptList({
     anchorHold,
     readingAnchorHeld,
     queueAnchorRestore,
+    spacer,
+    rowsRef,
+    scrollInset,
+    indexForPendingKey,
+    restoreReadingAnchor,
   });
   const { measureRow, bindSpacer } = useTranscriptRowRegistration({ viewport, spacer, content, virtualizerRef });
 
   useTranscriptScrollGeometry({ viewport, spacer, virtualizerRef, domTop, scrollInset, contentHeight, deviation });
-  useRememberVirtualMeasurements({ sessionKey, viewport, virtualizerRef, flushDeferredResizes });
-  useTranscriptHandles({ endPin, scrollToEndRef, setAnchorBottomRef, virtualizerRef, anchorOverride });
-  useSelectionDrag({ viewport, sessionKey, bottomInsetRef, rowsRef, setSelectionPin, onSelectionAutoScroll });
+  useRememberVirtualMeasurements({ sessionKey, viewport, virtualizerRef, flushDeferredResizes, settleHeldShrinks });
+  useTranscriptHandles({
+    endPin,
+    scrollToEndRef,
+    setAnchorBottomRef,
+    virtualizerRef,
+    anchorOverride,
+    settleHeldShrinks,
+  });
+  useSelectionDrag({ viewport, sessionKey, rowsRef, setSelectionPin, onSelectionAutoScroll });
 
   useEffect(
     () => () => {
@@ -228,7 +233,20 @@ function renderVirtualRow(
   const row = rows[virtualRow.index];
   if (!row) return null;
   const next = rows[virtualRow.index + 1];
-  const turnEnd = !next || next._tag === 'TurnGap';
+  const previous = rows[virtualRow.index - 1]?._tag;
+  // The live band under a reply part or tool card is the same 40px status
+  // slot as the completion footer that replaces it (12-transcript.css): the
+  // row above it takes no step, the band leads in itself.
+  const leadsBand = (tag: TranscriptRowModel['_tag'] | undefined) => tag === 'AssistantPart' || tag === 'ToolActivity';
+  // The step after a reply part, tool card or error belongs to the row BELOW
+  // it. As the part's own bottom padding, appending the next row resized the
+  // settled part above it, and the new row was placed at the old size for a
+  // frame before jumping 8px (tool rounds shook the whole thread).
+  const part = (tag: TranscriptRowModel['_tag'] | undefined) =>
+    tag === 'AssistantPart' || tag === 'ToolActivity' || tag === 'Error';
+  const bandLead = row._tag === 'Thinking' && leadsBand(previous);
+  const stepBefore = !bandLead && row._tag !== 'TurnGap' && part(previous);
+  const turnEnd = !part(row._tag) && (!next || next._tag === 'TurnGap');
   return (
     // A row binds position AND measurement to one element.
     // Position and measurement therefore share the
@@ -249,6 +267,8 @@ function renderVirtualRow(
         data-index={virtualRow.index}
         data-tag={row._tag}
         data-turn-end={turnEnd ? 'true' : undefined}
+        data-band-lead={bandLead ? 'true' : undefined}
+        data-step-before={stepBefore ? 'true' : undefined}
       >
         {renderRow(row)}
       </div>

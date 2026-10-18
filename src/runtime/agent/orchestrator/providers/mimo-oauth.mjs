@@ -9,6 +9,7 @@
 import { noteErrorUsage } from './lib/note-error-usage.mjs';
 import { fileMtimeMs, scrubOAuthSecrets } from './lib/oauth-token-utils.mjs';
 import { OpenAICompatProvider, preloadOpenAICompatRuntime } from './openai-compat.mjs';
+import { COMPAT_RETRY_POLICY, compatFirstResponseBudget } from './openai-compat-retry-profile.mjs';
 import { fetchCompatModelItems, listCompatModels } from './openai-compat-models.mjs';
 import { makeModelCache } from './model-cache.mjs';
 import {
@@ -114,6 +115,8 @@ export class MimoOAuthProvider {
   // OpenAI-compatible usage: prompt_tokens includes cached. See registry.mjs.
   static inputExcludesCache = false;
   name = 'mimo-oauth';
+  // The retry profile's limits are final: no loop-level recovery cycles on top.
+  retryPolicy = COMPAT_RETRY_POLICY;
   config;
   tokens = null;
   _inner = null;
@@ -147,6 +150,12 @@ export class MimoOAuthProvider {
       throw new Error('[mimo-oauth] credentials not found — open /providers in mixdog to sign in first');
     }
     return this.tokens;
+  }
+
+  // The inner client's chat profile sets a longer first-byte window; the
+  // budget needs no credentials, so it is read from the profile directly.
+  firstResponseBudget() {
+    return compatFirstResponseBudget(this.name, MIMO_CHAT_PROFILE);
   }
 
   _ensureInner() {

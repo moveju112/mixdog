@@ -1,6 +1,6 @@
 import { Bot, ChevronDown, ChevronRight } from 'lucide-react';
 import type React from 'react';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { InitialSurface } from './InitialSurface';
 import { AGENT_GROUP_EXPANSION_EVENT, AgentGroupsMenu, useHiddenAgentGroups } from './agent-group-visibility';
 import { RowOverflowMenu, rowOverflowHostProps } from './RowOverflowMenu';
@@ -15,6 +15,8 @@ import {
 import { sessionSummaryTitle } from '../shared/session-title.mjs';
 import { t } from './i18n';
 import { agentElapsedText } from './agent-row-meta';
+import { clearableAgentTreeRows, dismissFinishedAgentRows, useVisibleAgentPool } from './agent-dismiss';
+import { agentQuietParts, agentStageCueText, QuietCue } from './quiet-cue';
 import { AgentProviderMark, AgentRouteSummary } from './agent-row-parts';
 import { TextShimmer } from './transcript-primitives';
 import {
@@ -39,7 +41,66 @@ export {
   preloadAgentPool,
 } from './agent-activity-model';
 
-export function AgentPoolRow({
+/** A running row's clock: the caller's when it supplies one, otherwise a
+ *  one-second tick owned by the leaf that reads it, so only that leaf
+ *  re-renders each second, not its row or pane. */
+function useRowClock(state: DesktopAgentActivityState, clock: number | undefined): number {
+  const ticking = state === 'running' && clock === undefined;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!ticking) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [ticking]);
+  return clock ?? now;
+}
+
+/** A running row's quiet-time cue (nothing while it makes progress); before
+ *  it is quiet, a request waiting for its headers reads "Model thinking". */
+function AgentRowQuiet({
+  state,
+  agent,
+  clock,
+}: {
+  state: DesktopAgentActivityState;
+  agent: DesktopAgentPoolRow;
+  clock?: number;
+}): React.ReactElement | null {
+  const now = useRowClock(state, clock);
+  const parts = state === 'running' ? agentQuietParts(agent, now) : null;
+  if (!parts) {
+    const stage = state === 'running' ? agentStageCueText(agent) : '';
+    return stage ? <span className="quiet-cue agent-quiet-cue">{stage}</span> : null;
+  }
+  return <QuietCue parts={parts} sessionId={String(agent.sessionId || '').trim()} className="agent-quiet-cue" />;
+}
+
+/** The row's right-column text. */
+function AgentRowElapsed({
+  state,
+  agent,
+  clock,
+}: {
+  state: DesktopAgentActivityState;
+  agent: DesktopAgentPoolRow;
+  clock?: number;
+}): React.ReactElement {
+  const elapsed = agentElapsedText(state, agent, useRowClock(state, clock));
+  return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-label on <time> gives the elapsed duration an explicit accessible name
+    <time
+      className="agent-activity-elapsed"
+      aria-label={elapsed}
+      title={state === 'cancel-unconfirmed' ? t('Cancel unconfirmed') : undefined}
+      data-state={state}
+    >
+      {elapsed}
+    </time>
+  );
+}
+
+export const AgentPoolRow = memo(function AgentPoolRow({
   agent,
   clock,
   stateOverride,
@@ -59,7 +120,9 @@ export function AgentPoolRow({
   onOpenSession,
 }: {
   agent: DesktopAgentPoolRow;
-  clock: number;
+  /** A caller-owned clock (the composer island's); omitted, a running row
+   *  ticks on its own. */
+  clock?: number;
   /** A lifecycle state the caller already resolved (the composer island's
    *  rows, which merge worker and job entries); the sidebar derives its own. */
   stateOverride?: DesktopAgentActivityState;
@@ -99,7 +162,6 @@ export function AgentPoolRow({
     tag && tag.toLowerCase() !== sessionTitle.toLowerCase()
       ? [sessionTitle, tag].filter(Boolean).join(' · ')
       : sessionTitle || tag || role;
-  const elapsed = agentElapsedText(state, agent, clock);
   const prefetch = () => {
     if (sessionId) onPrefetchSession?.(lead ? ownerSessionId : sessionId);
   };
@@ -181,21 +243,14 @@ export function AgentPoolRow({
           {lead && descendantCount > 0 && <span className="dock-review-count">{descendantCount}</span>}
         </span>
         <AgentRouteSummary agent={agent} />
+        <AgentRowQuiet state={state} agent={agent} clock={clock} />
       </span>
       <span className="agent-activity-status">
-        {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-label on <time> gives the elapsed duration an explicit accessible name */}
-        <time
-          className="agent-activity-elapsed"
-          aria-label={elapsed}
-          title={state === 'cancel-unconfirmed' ? t('Cancel unconfirmed') : undefined}
-          data-state={state}
-        >
-          {elapsed}
-        </time>
+        <AgentRowElapsed state={state} agent={agent} clock={clock} />
       </span>
     </button>
   );
-}
+});
 
 const AGENT_TREE_KEYS = new Set(['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End']);
 
@@ -210,7 +265,6 @@ function AgentActivityTree({
   groupExpanded,
   expandedSessionIds,
   onSetExpanded,
-  clock,
   unreadSessionIds,
   onExpandGroup,
   onCollapseGroup,
@@ -223,7 +277,6 @@ function AgentActivityTree({
   groupExpanded: boolean;
   expandedSessionIds: ReadonlySet<string>;
   onSetExpanded(sessionId: string, expanded: boolean): void;
-  clock: number;
   unreadSessionIds?: ReadonlySet<string>;
   onExpandGroup?(): void;
   onCollapseGroup?(): void;
@@ -317,7 +370,6 @@ function AgentActivityTree({
         <AgentPoolRow
           key={poolRowKey(node.agent, index)}
           agent={node.agent}
-          clock={clock}
           depth={node.depth}
           parentSessionId={node.parentSessionId}
           hasChildren={node.children.length > 0}
@@ -417,7 +469,6 @@ function expandedAgentActivityIds(
 
 function renderAgentActivityGroup({
   group,
-  clock,
   expandedSessionIds,
   unreadSessionIds,
   setSessionExpanded,
@@ -427,7 +478,6 @@ function renderAgentActivityGroup({
   onOpenSession,
 }: {
   group: AgentActivitySessionGroup;
-  clock: number;
   expandedSessionIds: ReadonlySet<string>;
   unreadSessionIds?: ReadonlySet<string>;
   setSessionExpanded(sessionId: string, expanded: boolean): void;
@@ -468,6 +518,14 @@ function renderAgentActivityGroup({
               label: t('Hide this group'),
               onSelect: () => hideGroup(group.ownerId),
             },
+            {
+              id: 'clear-finished-agents',
+              label: t('Clear finished'),
+              disabled: clearableAgentTreeRows(group.nodes).length === 0,
+              onSelect: () => {
+                dismissFinishedAgentRows(clearableAgentTreeRows(group.nodes));
+              },
+            },
           ]}
         />
       </div>
@@ -477,7 +535,6 @@ function renderAgentActivityGroup({
         groupExpanded={expanded}
         expandedSessionIds={expandedSessionIds}
         onSetExpanded={setSessionExpanded}
-        clock={clock}
         unreadSessionIds={unreadSessionIds}
         onExpandGroup={() => setGroupCollapsed(false)}
         onCollapseGroup={() => setGroupCollapsed(true)}
@@ -512,8 +569,10 @@ export function AgentActivityPane({
   onOpenSession?(sessionId: string, title: string, ownerSessionId: string): void;
 }): React.ReactElement {
   const poolStore = useMemo(() => agentPoolStore(window.mixdogDesktop), []);
-  const agents = useSyncExternalStore(poolStore.subscribe, poolStore.getSnapshot, poolStore.getSnapshot);
-  const [clock, setClock] = useState(() => Date.now());
+  // Rows the user cleared ("Clear finished") stay out of every group.
+  const agents = useVisibleAgentPool(
+    useSyncExternalStore(poolStore.subscribe, poolStore.getSnapshot, poolStore.getSnapshot)
+  );
   const [expandedSessionIds, setExpandedSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const setSessionExpanded = (sessionId: string, expanded: boolean): void =>
     setExpandedSessionIds((current) => {
@@ -535,13 +594,6 @@ export function AgentActivityPane({
     window.addEventListener(AGENT_GROUP_EXPANSION_EVENT, setAllExpanded);
     return () => window.removeEventListener(AGENT_GROUP_EXPANSION_EVENT, setAllExpanded);
   }, [groups, hiddenOwnerIds]);
-  const hasLiveClock = (agents || []).length > 0;
-  useEffect(() => {
-    if (!active || !hasLiveClock) return undefined;
-    setClock(Date.now());
-    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [active, hasLiveClock]);
 
   const loading = agents === null || (!sessionsReady && groups.length === 0);
   if (active) beginBootSurface('agent-activity', 'catalog');
@@ -571,7 +623,6 @@ export function AgentActivityPane({
       {visibleGroups.map((group) =>
         renderAgentActivityGroup({
           group,
-          clock,
           expandedSessionIds,
           unreadSessionIds,
           setSessionExpanded,

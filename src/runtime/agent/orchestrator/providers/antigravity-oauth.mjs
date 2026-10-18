@@ -21,6 +21,11 @@ import { createAntigravityStreamCollector } from './antigravity-stream.mjs';
 import { createAntigravityRequest } from './antigravity-transport.mjs';
 import { finalizeAntigravityTurn } from './antigravity-response.mjs';
 import {
+  ANTIGRAVITY_ACCOUNT_COOLDOWN_POLICY,
+  antigravityFirstBytePolicy,
+  antigravityFirstResponseBudget,
+} from './antigravity-retry-policy.mjs';
+import {
   CONTENT_ENDPOINT,
   ANTIGRAVITY_MODELS,
   DEFAULT_ANTIGRAVITY_MODEL,
@@ -69,6 +74,11 @@ export class AntigravityOAuthProvider {
   // usageMetadata.promptTokenCount is the total, cached tokens included.
   static inputExcludesCache = false;
   name = 'antigravity-oauth';
+  // Roster cooldowns the shared account pool applies when the server names no delay.
+  accountCooldownPolicy = ANTIGRAVITY_ACCOUNT_COOLDOWN_POLICY;
+  // The capacity / quick-retry ladder is the whole recovery: a spent ladder
+  // surfaces instead of parking on loop recovery cycles.
+  retryPolicy = Object.freeze({ recoveryCycles: false });
 
   constructor(config = {}) {
     this.config = config || {};
@@ -89,6 +99,13 @@ export class AntigravityOAuthProvider {
   _contentEndpoint() {
     const configured = String(this.config.baseURL || '').trim();
     return configured || CONTENT_ENDPOINT;
+  }
+
+  // Longest one send to `model` may wait for response headers / first output,
+  // the whole transport retry ladder included; the agent watchdog's
+  // first-response deadlines are floored above it.
+  firstResponseBudget(model) {
+    return antigravityFirstResponseBudget(antigravityFirstBytePolicy(model || DEFAULT_ANTIGRAVITY_MODEL));
   }
 
   _buildBody(messages, model, tools, opts) {
@@ -162,6 +179,8 @@ export class AntigravityOAuthProvider {
       opts,
       signal: passthrough.signal,
       collector,
+      sleepFn: this.config.sleepFn,
+      firstByte: antigravityFirstBytePolicy(useModel),
     });
     try {
       try {

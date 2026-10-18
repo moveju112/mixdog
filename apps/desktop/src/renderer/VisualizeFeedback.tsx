@@ -53,9 +53,11 @@ import {
   visualizeFeedbackPageMessage,
 } from '../shared/visualize-feedback';
 import { tweakOps } from '../shared/visualize-tweaks';
+import { showDesktopToast } from './desktop-toasts';
 import { t } from './i18n';
 import { loadImage } from './load-image';
 import { takeVisualizeElementPin, useVisualizeElementPinPending } from './visualize-elements-store';
+import { openVisualizePageLink } from './visualize-store';
 import {
   beginVisualizeCapture,
   consumeVisualizeChoiceGesture,
@@ -482,12 +484,20 @@ export function useVisualizeFeedbackBridge({
         answered.set(event.source, now);
         postToPage(frame, stateRef.current(index, true));
       } else if (message.type === 'tweaks') {
-        // The page's declared controls: a malformed block is logged by the page
-        // itself, which the desktop reports as a page problem.
+        // A document announces its own controls once it is ready (never
+        // throttled: a reload at the same URL announces again). Its saved
+        // overrides are replayed from these definitions only: a new document
+        // has nothing applied, so nothing from the previous one is cleared.
+        // A malformed block is logged by the page itself, which the desktop
+        // reports as a page problem.
         const defs = setVisualizeTweakDefs(session, shown.id, index, message.raw);
+        const replay = tweaksRef.current(index);
+        if (replay) postToPage(frame, replay);
         if (defs && 'error' in defs) postToPage(frame, { type: 'tweaks-problem', reason: defs.error });
       } else if (message.type === 'exit-comment') {
         if (live.current.comment) live.current.setComment(false);
+      } else if (message.type === 'link') {
+        if (!live.current.comment) openVisualizePageLink(session, message.url, message.external);
       } else if (message.type === 'choice') {
         // Comment mode covers the pane: no page click can be a choice then.
         if (live.current.comment) return;
@@ -545,11 +555,27 @@ export function useVisualizeFeedbackBridge({
     return () => body.removeEventListener('load', onLoad, true);
   }, [body]);
 
-  // Panel → pages: Comment mode and the pin numbers.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: value, comment and the tweaks revision are re-send triggers; they are read through the live refs
+  // Panel → pages: Comment mode and the pin numbers. Keyed on what is sent
+  // (the shown panes and their messages), not on the tab object or the whole
+  // feedback / tweak state, so an unrelated change resends nothing.
+  // tweaksRevision only re-renders this hook when a tweak changes; the tweak
+  // messages themselves are part of the key.
+  void tweaksRevision;
+  const pageKey =
+    body && tab
+      ? JSON.stringify([
+          tab.id,
+          tab.revision,
+          tab.panes.map((pane, index) =>
+            visualizeCommentPage(pane.kind) ? [pane.kind, pane.url, stateFor(index, false), tweaksFor(index)] : null
+          ),
+        ])
+      : '';
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pageKey is the re-send trigger; the messages are read through the live refs
   useEffect(() => {
-    if (!body || !tab) return;
-    tab.panes.forEach((pane, index) => {
+    const shown = live.current.tab;
+    if (!body || !shown) return;
+    shown.panes.forEach((pane, index) => {
       if (!visualizeCommentPage(pane.kind)) return;
       const frame = body.querySelector<HTMLIFrameElement>(`[data-visualize-pane="${index}"] iframe`);
       if (!frame) return;
@@ -557,7 +583,7 @@ export function useVisualizeFeedbackBridge({
       const tweaks = tweaksRef.current(index);
       if (tweaks) postToPage(frame, tweaks);
     });
-  }, [body, tab, value, comment, tweaksRevision]);
+  }, [body, pageKey]);
 
   // Esc leaves Comment mode (inside a page, the page script reports it).
   useEffect(() => {
@@ -574,40 +600,26 @@ export function useVisualizeFeedbackBridge({
   }, [body, comment]);
 }
 
-/** The strip under the toolbar while Comment mode is on: what the shown
- *  panes accept, the pin count, and the way out. */
-export function VisualizeCommentHints({
-  sessionId,
-  kinds,
-  onEnd,
-}: {
-  sessionId: string;
-  kinds: readonly string[];
-  onEnd(): void;
-}) {
-  const value = useVisualizeFeedback(sessionId);
-  return (
-    <div className="visualize-comment-hint" role="status" aria-label={t('Comment mode')}>
-      <span className="visualize-comment-hint-dot" aria-hidden="true" />
-      <span className="visualize-comment-hint-actions">
-        {visualizeCommentHints(kinds).map((hint) => (
-          <span key={hint.id}>
-            {hint.keys?.map((key) => (
-              <kbd key={key}>{key}</kbd>
-            ))}
-            {hint.keys ? ' ' : null}
-            {t(hint.text)}
-          </span>
-        ))}
-      </span>
-      <span className="visualize-comment-hint-count">
-        {t('Pins {{n}}/{{max}}', { n: value.pins.length, max: MAX_VISUALIZE_PINS })}
-      </span>
-      <button type="button" onClick={onEnd}>
-        <kbd>Esc</kbd> {t('End comments')}
-      </button>
-    </div>
+export const VISUALIZE_COMMENT_HINT_SEEN_KEY = 'mixdog:visualize-comment-hint-seen';
+
+/** What Comment mode accepts for these pane kinds, and the way out, as one line. */
+export function visualizeCommentHintText(kinds: readonly string[]): string {
+  const actions = visualizeCommentHints(kinds).map((hint) =>
+    [hint.keys?.join(''), t(hint.text)].filter(Boolean).join(' ')
   );
+  return [...actions, `Esc ${t('End comments')}`].join(' · ');
+}
+
+/** The mode explains itself once (a toast, never a bar under the toolbar);
+ *  after that the Comment button's pressed state is the only sign. */
+export function announceVisualizeCommentMode(kinds: readonly string[]): void {
+  try {
+    if (window.localStorage.getItem(VISUALIZE_COMMENT_HINT_SEEN_KEY)) return;
+    window.localStorage.setItem(VISUALIZE_COMMENT_HINT_SEEN_KEY, '1');
+  } catch {
+    // Storage unavailable: the hint shows each time.
+  }
+  showDesktopToast(visualizeCommentHintText(kinds), 'info', { scope: 'visualize-comment' });
 }
 
 const fractionStyle = (rect: VisualizeFeedbackRect) => ({

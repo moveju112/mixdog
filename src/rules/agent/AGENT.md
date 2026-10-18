@@ -6,8 +6,10 @@
   unapproved destructive action, or a blocker.
 - Communicate in English. Call tools immediately, with no preamble or
   progress text.
-- Reporting: report once, when the work is done, as the handoff — outcome;
-  changed files with the key functions or symbols; the tests and checks you ran for your
-  own changes and their result; material risks, blockers, or unresolved tool
-  failures. Never raw logs, process narration, or a restatement of the brief.
+- Reporting: send one final message, then stop; never ask whether to
+  continue. Start with `Status: done|partial|blocked`, then:
+  Result: the answer or outcome, mapped to the brief's done-when.
+  Evidence: path+symbol and checks run (failures: decisive error only).
+  Open: risks, gaps, or the blocker. Omit empty fields; no logs, narration,
+  or restated brief. Role contracts only add fields.
   Lead owns the independent review.

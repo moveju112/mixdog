@@ -10,6 +10,7 @@ import { leadReviewCheckpointIdCache, leadReviewFilesCache, rememberAgentReviews
 import { turnReviewScope } from './renderer-logic.mjs';
 import { preloadMarkdownBody } from './markdown-body-loader';
 import { parseStreamingMarkdownAst } from './markdown-worker-client';
+import { useTranscriptRows } from './use-conversation-rows';
 
 function mount(t) {
   const { dom, root } = installTestDom(t, {
@@ -61,6 +62,52 @@ test('settling an assistant preserves its rendered Markdown without an empty int
   assert.ok(document.querySelector('.response-footer'));
 });
 
+test('a completed reply takes the live band’s place: no band lingers below its footer while busy', async (t) => {
+  const { root } = mount(t);
+  const prompt = { kind: 'user', id: 'prompt', text: 'Answer briefly' };
+  const reply = { kind: 'assistant', id: 'reply', text: 'Done.' };
+  const done = { kind: 'turndone', id: 'done', status: 'done', verb: 'Completed', elapsedMs: 1_000 };
+  let tags = [];
+  function Rows(props) {
+    const settledItems = props.items;
+    const { transcriptRows } = useTranscriptRows({
+      identity: 'band-session',
+      sessionKey: 'band-session',
+      settledItems,
+      settledRowItems: settledItems,
+      failedTurnKeys: [],
+      precomputedTurnKeys: null,
+      pendingItems: props.pendingItems ?? [],
+      liveItem: props.liveItem ?? null,
+      busy: props.busy,
+      commandBusy: false,
+      commandActivityVisible: props.activity ?? false,
+      optimisticActivityStartedAt: 0,
+    });
+    tags = transcriptRows.map((row) => row._tag);
+    return null;
+  }
+  const render = (props) => act(async () => root.render(React.createElement(Rows, props)));
+  await render({ items: [prompt], liveItem: { ...reply, streaming: true }, busy: true });
+  assert.deepEqual(tags, ['UserMessage', 'AssistantPart', 'Thinking'], 'streaming: the band sits under the reply');
+  await render({ items: [prompt, reply, done], busy: true });
+  assert.deepEqual(
+    tags,
+    ['UserMessage', 'AssistantPart'],
+    'the footer replaced the band; a busy flag alone keeps none'
+  );
+  await render({ items: [prompt, reply, done], busy: true, activity: true });
+  assert.deepEqual(tags, ['UserMessage', 'AssistantPart', 'Thinking'], 'visible activity brings the band back');
+  await render({ items: [prompt, reply], busy: true });
+  assert.deepEqual(
+    tags,
+    ['UserMessage', 'AssistantPart', 'Thinking'],
+    'an open turn keeps its band through null activity'
+  );
+  await render({ items: [prompt, reply, done, { kind: 'user', id: 'wake', text: 'next', hidden: true }], busy: true });
+  assert.deepEqual(tags, ['UserMessage', 'AssistantPart', 'Thinking'], 'a hidden follow-up turn keeps the band');
+});
+
 test('the island files segment appears only once the session diff read finds changes, including an empty final diff', async (t) => {
   const { root, document, window } = mount(t);
   // ComposerDock loads the review module lazily; with the chunk cached it
@@ -84,7 +131,8 @@ test('the island files segment appears only once the session diff read finds cha
     const scope = turnReviewScope(items).key;
     rememberAgentReviews(`${sessionId}:${scope}`, [], '', [], 'worktree', scope);
     const props = {
-      sessionId: '',
+      // The island mounts once the session's first lane snapshot has named it.
+      sessionId,
       goalSubmissionId: '',
       showProjectSelector: false,
       reviewActive: true,
@@ -135,9 +183,11 @@ test('the island files segment appears only once the session diff read finds cha
       assert.match(segment().textContent, /^1 file\+1/, 'the count in words, singular for one file');
       assert.ok(segment().firstElementChild.classList.contains('composer-island-seg-icon'), 'the file glyph leads');
       assert.equal(segment().querySelector('.composer-island-seg-num').dataset.count, '1');
-      // No side dock here (no onOpenSessionDiff): the segment expands the
-      // island to the turn's file list in place, and Escape collapses it.
+      // No side dock here (no onOpenSessionDiff): the segment's View changes
+      // expands the island to the turn's file list in place, and Escape
+      // collapses it.
       await act(async () => segment().click());
+      await act(async () => document.querySelector('.turn-review-files-menu [role="menuitem"]').click());
       assert.equal(document.querySelector('.composer-island').dataset.expanded, 'files');
       const bar = document.querySelector('.composer-island-pill > .turn-review-bar');
       assert.equal(bar?.dataset.expanded, 'true');
@@ -208,7 +258,7 @@ test('a transcript tail without its prompt row keeps the turn review of that tur
         React.createElement(
           ComposerDock,
           {
-            sessionId: '',
+            sessionId,
             goalSubmissionId: '',
             showProjectSelector: false,
             reviewActive: true,

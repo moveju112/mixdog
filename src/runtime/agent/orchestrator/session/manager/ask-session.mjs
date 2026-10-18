@@ -6,6 +6,7 @@
 // abort-aware call wrapper is ask-call-interrupt. This file owns the lock,
 // the loop and the runtime bookkeeping around each turn.
 import { createHash } from 'node:crypto';
+import { admitWorkspaceActivity } from '../../../../shared/worktrees/activity-gate.mjs';
 import {
   persistedAssistantTranscriptMetadata,
   persistedUserTranscriptMetadata,
@@ -38,6 +39,16 @@ const traceAskStart = (sessionId, explicitPrefetch) => {
   );
 };
 
+/** A background follow-up ask has no caller to reject to; its failure would
+ *  otherwise strand the pending input silently. */
+const logFollowUpFailure = (sessionId) => (error) => {
+  try {
+    process.stderr.write(`[agent-ask] follow-up ask failed session=${sessionId}: ${error?.message || error}\n`);
+  } catch {
+    /* best-effort */
+  }
+};
+
 /** The transcript timestamps the caller supplied for this ask: the persisted
  *  user metadata plus a one-shot reader for the assistant metadata. */
 export function createAskTranscriptMeta(rawTranscriptMeta) {
@@ -66,7 +77,13 @@ export function createAskTranscriptMeta(rawTranscriptMeta) {
  *  the turn state and rethrows. Returns the terminal result preview and the
  *  follow-ups drained right after the provider accepted the turn. */
 async function runAskTurn({ sessionId, opened, input, askOpts, onToolCall, cwdOverride, transcript, askStartedAt }) {
+  let releaseWorkspace;
   try {
+    releaseWorkspace = await admitWorkspaceActivity(
+      sessionId,
+      cwdOverride || opened.turn.session.cwd || process.cwd(),
+      opened.runtime.controller?.signal
+    );
     const prepared = await prepareAskTurn({ sessionId, opened, input, cwdOverride, transcriptMeta: transcript.user });
     const result = await runAskAgentLoop({
       sessionId,
@@ -105,8 +122,12 @@ async function runAskTurn({ sessionId, opened, input, askOpts, onToolCall, cwdOv
       generation: opened.askGeneration,
       turnCheckpointToken: opened.turnToken,
       runtime: opened.runtime,
+      transcriptMeta: transcript.raw,
+      askStartedAt,
     });
     throw err;
+  } finally {
+    releaseWorkspace?.();
   }
 }
 
@@ -122,9 +143,12 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
     process.stderr.write(`[agent-trace] lock-acquired waitedMs=${Date.now() - askStartedAt}\n`);
   }
   // A non-empty cross-process sweep starts an empty follow-up ask once the
-  // current session lock is released; it never delays completion.
+  // current session lock is released; it never delays completion. The
+  // failed-turn retry identity is one-shot: a follow-up runs queued input,
+  // never the retried turn. Nobody awaits it, so a failure is logged.
+  const followUpOpts = { ...askOpts, retryFailedTurn: undefined, retryTurnId: undefined, retryAttemptId: undefined };
   const kickFollowUpAsk = () => {
-    askSession(sessionId, '', null, onToolCall, cwdOverride, null, askOpts).catch(() => {});
+    askSession(sessionId, '', null, onToolCall, cwdOverride, null, followUpOpts).catch(logFollowUpFailure(sessionId));
   };
   // The mutex is held for the WHOLE askSession call, including any follow-up
   // turns drained from the pending-message queue below — the single outer
@@ -141,6 +165,7 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
   // A failed-turn retry rewinds only the turn it retries, never a drained
   // follow-up turn.
   let retryFailedTurn = askOpts.retryFailedTurn === true;
+  let retryTurnId = askOpts.retryTurnId;
   try {
     // Turn loop (pendingMessages pattern): run the current prompt, then drain
     // any `agent type=send` messages that were queued while this turn was in
@@ -163,6 +188,11 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
         input.retryFailedTurn = true;
         retryFailedTurn = false;
       }
+      if (retryTurnId) {
+        input.retryTurnId = retryTurnId;
+        input.retryAttemptId = askOpts.retryAttemptId;
+        retryTurnId = null;
+      }
       // Synchronous pre-await setup (must happen before any await so
       // closeSession() can't interleave between load and registration).
       const claimed = claimTurnRuntime({
@@ -178,6 +208,9 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
         ...claimed,
         ...armTurnDurability({ sessionId, ...claimed, pendingEntries: input.pendingEntries }),
       };
+      // From here the turn's own unwind (ask-turn-failure) acks or releases
+      // its entries; the queue keeps owning only the not-yet-started ones.
+      queue.markStarted();
       const turn = await runAskTurn({
         sessionId,
         opened,
@@ -193,9 +226,12 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
       // that arrived while this turn was in flight runs next, in order, as a
       // follow-up user turn. The mutex is still held, so a send racing this
       // drain either landed before (picked up here) or enqueues for the next
-      // loop. When the queue is empty we return the latest turn's result.
+      // loop. Follow-ups an idle ask already drained wait in the queue's
+      // tail and run before anything new. When both are empty we return the
+      // latest turn's result.
       const drained = turn.drained.length > 0 ? turn.drained : drainPendingMessages(sessionId);
-      if (queue.pushDrained(drained)) {
+      queue.pushDrained(drained);
+      if (queue.hasQueuedTurns()) {
         // Carry the just-committed in-memory session into the follow-up
         // turn so the queued tail sees the preceding assistant/tool
         // context. loadSession() would return this same live snapshot
@@ -211,11 +247,14 @@ export async function askSession(sessionId, prompt, context, onToolCall, cwdOver
             if (count <= 0) return;
             kickFollowUpAsk();
           })
-          .catch(() => {});
+          .catch(logFollowUpFailure(sessionId));
       });
       return result;
     }
   } finally {
+    // A failed/cancelled turn ends the ask: the follow-up turns drained
+    // behind it never ran, so their entries go back to the pending queue.
+    queue.releaseUnstarted();
     // A thrown setup/provider path must never leave a delayed checkpoint
     // writer alive after the turn lock is released.
     // Clear the controller only if it's still ours (closeSession may have

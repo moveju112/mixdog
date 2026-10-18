@@ -1,13 +1,24 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { createBrowserGuestCdp } from './cdp.ts';
+import { rememberBrowserIdentity } from './browser-identity.ts';
+import { CHROME_LIKENESS_SCRIPT } from './chrome-likeness.ts';
+import { DIALOG_BRIDGE_SCRIPT } from './dialog-bridge.ts';
 import { BrowserGuestStateStore } from './guest-state.ts';
 import { MAX_CHILD_CDP_SESSIONS } from './command.ts';
+import { formatPageReport } from './snapshot-format.ts';
 import { waitUntil } from '../../../../../src/runtime/shared/wait-until.test-support.mjs';
 
-function fixture(send = async () => ({}), matchInterceptRule = () => undefined, pageGuardScripts = undefined) {
-  const state = new BrowserGuestStateStore();
+function fixture(
+  send = async () => ({}),
+  matchInterceptRule = () => undefined,
+  pageGuardScripts = undefined,
+  rendererPeers = undefined,
+  lingerMs = undefined
+) {
+  const state = new BrowserGuestStateStore(rendererPeers);
   const calls = [];
   const guest = new EventEmitter();
   let attached = false;
@@ -30,6 +41,7 @@ function fixture(send = async () => ({}), matchInterceptRule = () => undefined, 
     debugger: debug,
     isDestroyed: () => destroyed,
     getURL: () => 'about:blank',
+    getUserAgent: () => 'Fixture/1.0',
     destroy: () => {
       destroyed = true;
       guest.emit('destroyed');
@@ -40,6 +52,7 @@ function fixture(send = async () => ({}), matchInterceptRule = () => undefined, 
     interceptFetchPatterns: () => [],
     matchInterceptRule,
     pageGuardScripts,
+    lingerMs,
   });
   const attachChild = (id) =>
     debug.emit('message', {}, 'Target.attachedToTarget', {
@@ -119,8 +132,60 @@ test('policy guards reach the root document and every child frame, and stay abse
   const sources = unrestricted.calls
     .filter((call) => call.method === 'Page.addScriptToEvaluateOnNewDocument')
     .map((call) => call.params.source);
-  assert.equal(sources.length, 1, 'only the dialog bridge is installed without a policy');
-  assert.match(sources[0], /__mixdogDialogBridgeInstalled/);
+  assert.deepEqual(
+    sources,
+    [DIALOG_BRIDGE_SCRIPT, CHROME_LIKENESS_SCRIPT],
+    'only the dialog bridge and the browser identity are installed without a policy'
+  );
+});
+
+test('a page only browsed shows no script, log or accessibility observation; driving brings them up and back down', async () => {
+  const f = fixture(undefined, undefined, undefined, undefined, 30);
+  await f.cdp.guestDebugger(f.guest);
+  f.attachChild('frame-1');
+  await f.state.for(f.guest).cdpSessions.get('frame-1').ready;
+  await waitUntil(() => f.calls.some((call) => call.method === 'Network.enable' && call.sessionId === 'frame-1'));
+  const driven = ['Runtime.enable', 'Log.enable', 'Accessibility.enable'];
+  const calls = (methods, sessionId) =>
+    f.calls.filter((call) => methods.includes(call.method) && call.sessionId === sessionId).map((call) => call.method);
+  assert.deepEqual(calls(driven, undefined), [], 'nothing a page could notice while a person browses');
+  assert.ok(f.calls.some((call) => call.method === 'Network.setUserAgentOverride' && call.sessionId === undefined));
+  assert.ok(f.calls.some((call) => call.method === 'Network.setUserAgentOverride' && call.sessionId === 'frame-1'));
+
+  const release = f.cdp.drive(f.guest);
+  await waitUntil(() => calls(driven, 'frame-1').length === 3, { message: 'child frame driven' });
+  assert.deepEqual(calls(driven, undefined).sort(), [...driven].sort());
+  f.attachChild('frame-2');
+  await waitUntil(() => calls(driven, 'frame-2').length === 3, { message: 'a frame attached while driving is driven' });
+  release();
+  const stopped = ['Runtime.disable', 'Log.disable', 'Accessibility.disable'];
+  await waitUntil(() => calls(stopped, undefined).length === 3 && calls(stopped, 'frame-1').length === 3, {
+    message: 'driving domains go down after the linger',
+  });
+  await f.cdp.detach(f.guest);
+});
+
+test('console entries a re-enabled domain replays are recorded once', async () => {
+  const f = fixture();
+  await f.cdp.guestDebugger(f.guest);
+  const log = (text, timestamp) =>
+    f.debug.emit('message', {}, 'Runtime.consoleAPICalled', {
+      type: 'log',
+      timestamp,
+      args: [{ type: 'string', value: text }],
+    });
+  log('first', 100);
+  const record = f.state.for(f.guest);
+  // Switching the domain back on replays what the page logged so far.
+  record.consoleReplay.floor.set('|runtime', record.consoleReplay.seen.get('|runtime'));
+  log('first', 100);
+  log('while idle', 200);
+  record.consoleReplay.floor.delete('|runtime');
+  log('first', 100);
+  const logged = record.console.format('all', '', 10);
+  assert.equal(logged.match(/log: first/g).length, 2, 'only the replay is skipped, never a live entry');
+  assert.match(logged, /while idle/);
+  await f.cdp.detach(f.guest);
 });
 
 test('root observes frames without recursive auto-attach or forced excess-frame detach', async () => {
@@ -362,13 +427,143 @@ test('frame removal during initialization does not start late observation domain
   await f.cdp.detach(f.guest);
 });
 
-test('bridge uninstall blocks concurrent reattachment until detach finishes', async () => {
-  const pending = Promise.withResolvers();
-  const f = fixture((method) => (method === 'Runtime.evaluate' ? pending.promise : Promise.resolve({})));
+test("a call against a page held by a renderer peer's dialog names that page, not its dialog's text", async () => {
+  const peer = {};
+  const f = fixture(
+    (method) => {
+      if (method === 'Runtime.evaluate') return new Promise(() => undefined);
+      // Held well past the input poll, as a blocked renderer holds it.
+      if (method.startsWith('Input.')) return new Promise((resolve) => setTimeout(() => resolve({}), 300));
+      return Promise.resolve({});
+    },
+    undefined,
+    undefined,
+    () => [peer]
+  );
   await f.cdp.guestDebugger(f.guest);
-  const closing = f.cdp.detach(f.guest, { uninstallScript: 'void 0' });
-  await assert.rejects(f.cdp.guestDebugger(f.guest), /unavailable/);
-  pending.resolve({});
-  await closing;
-  assert.equal(f.debug.isAttached(), false);
+  f.state.for(peer).pendingDialog = { type: 'confirm', message: 'Delete everything?', openedAt: 0 };
+  const error = await f.cdp.call(f.guest, 'Runtime.evaluate', {}, undefined, { timeoutMs: 10 }).catch((e) => e);
+  assert.match(
+    error.message,
+    new RegExp(
+      `an open confirm dialog on page ${f.state.pageId(peer)}, which shares this page's renderer[\\s\\S]*handle_dialog on that page`
+    )
+  );
+  assert.doesNotMatch(error.message, /Delete everything/, "the other page's text stays with it");
+  const input = await Promise.race([
+    f.cdp.sendCdpInput(f.guest, f.debug, 'Input.dispatchMouseEvent', { type: 'mousePressed' }),
+    new Promise((resolve) => setTimeout(() => resolve('timed out'), 1_000)),
+  ]);
+  assert.equal(input, 'dialog', 'input returns as soon as the blocking dialog is known');
+  await f.cdp.detach(f.guest);
+});
+
+test('a native dialog that closes by itself is reported once; a close never clears a bridged dialog', async () => {
+  const f = fixture();
+  await f.cdp.guestDebugger(f.guest);
+  const record = f.state.for(f.guest);
+  f.debug.emit('message', {}, 'Page.javascriptDialogOpening', { type: 'alert', message: 'too early' });
+  assert.equal(record.pendingDialog.type, 'alert');
+  f.debug.emit('message', {}, 'Page.javascriptDialogClosed', { result: false, userInput: '' });
+  assert.equal(record.pendingDialog, null);
+  assert.equal(record.dismissedDialog.reason, 'early');
+  const report = formatPageReport(record);
+  assert.match(report, /Dismissed alert dialog "too early": it opened before the browser was intercepting dialogs/);
+  assert.doesNotMatch(formatPageReport(record), /Dismissed/, 'said once');
+
+  const bridged = { type: 'confirm', message: 'held', openedAt: 0, bridgeRequestId: 'r1' };
+  record.pendingDialog = bridged;
+  f.debug.emit('message', {}, 'Page.javascriptDialogClosed', { result: false, userInput: '' });
+  assert.equal(record.pendingDialog, bridged);
+  await f.cdp.detach(f.guest);
+});
+
+test("a bridge request the page's policy refused becomes a dismissed notice, not a page log", async () => {
+  const f = fixture();
+  await f.cdp.guestDebugger(f.guest);
+  // The bridge script's own console call, as the page's renderer makes it.
+  const calls = [];
+  class Refused {
+    open() {}
+    send() {
+      throw new Error('Refused to connect: Content Security Policy');
+    }
+  }
+  const page = {
+    URL,
+    URLSearchParams,
+    XMLHttpRequest: Refused,
+    location: { href: 'https://csp.test/' },
+    console: { debug: (...args) => calls.push(args) },
+    window: {},
+  };
+  runInNewContext(DIALOG_BRIDGE_SCRIPT, page);
+  page.window.confirm('Proceed?');
+  const toEvent = (type, args) => ({ type, args: args.map((value) => ({ type: 'string', value })) });
+  f.debug.emit('message', {}, 'Runtime.consoleAPICalled', toEvent('debug', calls[0]));
+  f.debug.emit('message', {}, 'Runtime.consoleAPICalled', toEvent('debug', ['page says hi']));
+  const record = f.state.for(f.guest);
+  assert.deepEqual(record.dismissedDialog, { type: 'confirm', message: 'Proceed?', reason: 'unreachable' });
+  const logged = record.console.format('all', '', 10);
+  assert.match(logged, /page says hi/, 'ordinary console calls are still recorded');
+  assert.doesNotMatch(logged, /Proceed\?/, 'the notice is the host’s, not the page’s log');
+  assert.match(formatPageReport(record), /Dismissed confirm dialog "Proceed\?": its request never reached the browser/);
+  await f.cdp.detach(f.guest);
+});
+
+// Last in this file: the engine's facts are process-wide once learned.
+test("a blank first page keeps the engine's identity; the first secure document brings Chrome's to every session", async () => {
+  rememberBrowserIdentity({ userAgent: 'Fixture/1.0' });
+  let secure = false;
+  const f = fixture(async (method) => {
+    if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } };
+    if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 };
+    if (method === 'Runtime.evaluate') {
+      return {
+        result: {
+          value: secure
+            ? { platform: 'Windows', platformVersion: '19.0.0', architecture: 'x86', model: '', mobile: false }
+            : null,
+        },
+      };
+    }
+    return {};
+  });
+  await f.cdp.guestDebugger(f.guest);
+  f.attachChild('frame-1');
+  await f.state.for(f.guest).cdpSessions.get('frame-1').ready;
+  const overrides = () => f.calls.filter((call) => call.method === 'Network.setUserAgentOverride');
+  assert.deepEqual(
+    overrides().map((call) => call.params),
+    [{ userAgent: '' }, { userAgent: '' }],
+    'an override without metadata would empty the brand list'
+  );
+  const probe = f.calls.find((call) => call.method === 'Runtime.evaluate');
+  assert.equal(probe.params.contextId, 7, 'read in a world no page script shares');
+  secure = true;
+  f.debug.emit('message', {}, 'Page.frameNavigated', { frame: { id: 'main', url: 'https://site.test/' } });
+  await waitUntil(() => overrides().length === 4, { message: 'root and child re-identified' });
+  for (const call of overrides().slice(2)) {
+    assert.equal(call.params.userAgent, 'Fixture/1.0');
+    assert.ok(call.params.userAgentMetadata.brands.some((entry) => entry.brand === 'Google Chrome'));
+  }
+  assert.deepEqual(
+    overrides()
+      .slice(2)
+      .map((call) => call.sessionId),
+    [undefined, 'frame-1']
+  );
+  await f.cdp.detach(f.guest);
+});
+
+test('an unexpected debugger detach settles the prompts it held instead of leaving them pending', async () => {
+  const f = fixture();
+  await f.cdp.guestDebugger(f.guest);
+  const record = f.state.for(f.guest);
+  record.pendingDialog = { type: 'prompt', message: 'held', openedAt: 0, bridgeRequestId: 'r1' };
+  record.pendingFileChooser = { mode: 'selectSingle', openedAt: 0 };
+  f.debug.emit('detach', {}, 'replaced_with_devtools');
+  assert.equal(record.pendingDialog, null);
+  assert.equal(record.pendingFileChooser, null);
+  assert.match(record.fault, /CDP detached: replaced_with_devtools/);
 });

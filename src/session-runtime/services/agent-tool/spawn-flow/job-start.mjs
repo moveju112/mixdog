@@ -44,6 +44,8 @@ export function createJobStarter({ mgr, notifyStatusChange, notifySessionComplet
       meta: jobMeta,
       resultType: 'agent_task_result',
       renderResult: (result) => renderResult(result),
+      // Cancellation reaches the owner once, with the worker's partial output.
+      notifyOnCancel: true,
       cancel: () => {
         try {
           admissionController.abort(new Error('agent task cancelled before resource admission'));
@@ -51,7 +53,9 @@ export function createJobStarter({ mgr, notifyStatusChange, notifySessionComplet
         const currentMeta = task?.meta || jobMeta;
         if (currentMeta?.sessionId) {
           try {
-            Promise.resolve(mgr.closeSession(currentMeta.sessionId, 'agent-task-cancel')).catch(() => {});
+            Promise.resolve(mgr.closeSession(currentMeta.sessionId, 'agent-task-cancel', { tombstone: false })).catch(
+              () => {}
+            );
           } catch {}
         }
         setImmediate(notifyStatusChange);

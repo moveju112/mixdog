@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { getPluginData } from '../../config.mjs';
 import { PLUGIN_LOG_MAX_BYTES, PLUGIN_LOG_KEEP_BYTES } from '../../../../../lib/mixdog-debug.cjs';
 import { createAsyncLogAppender } from '../../../../shared/async-log-appender.mjs';
-import { sessionPath, deleteHeartbeat } from './paths-heartbeat.mjs';
+import { sessionPath } from './session-paths.mjs';
 import {
   readCanonicalSessionRecord as _readCanonicalRecord,
   CANONICAL_RECORD_UNREADABLE as LIFECYCLE_AMBIGUOUS,
@@ -36,7 +36,7 @@ import {
 } from './live-state.mjs';
 import { _uncacheSessionSummary, _queueSessionSummaryUpsert } from './summary-cache.mjs';
 import { _savePending, _clearDebounce } from './pending-saves.mjs';
-import { _runtimeLivenessVeto, _heartbeatLivenessVeto, _deleteHeartbeatUnlessNewer } from './liveness-veto.mjs';
+import { _runtimeLivenessVeto } from './liveness-veto.mjs';
 import { loadSession } from './load-session.mjs';
 
 // Cancellation truth, single rule: an UNCONFIRMED stop outranks a confirmed
@@ -159,8 +159,22 @@ function _logSessionCloseMetric(id, existing, closedAt, reason) {
 }
 
 /**
+ * A barrier that found no record at all — nothing on disk and no live or
+ * pending copy in memory — fenced nothing because there is nothing to fence:
+ * its pending writes were already cancelled under the commit lock. It still
+ * returns null (no generation exists), but a caller passing `options.outcome`
+ * learns that the record was legitimately gone rather than vetoed, contended
+ * or failed.
+ */
+function _recordAbsent(options) {
+  if (options?.outcome && typeof options.outcome === 'object') options.outcome.absent = true;
+  return null;
+}
+
+/**
  * Atomically mark a session closed on disk with a bumped generation.
  * Returns the new generation, or null if the session file doesn't exist.
+ * `options.outcome` (an object) gets `absent: true` when no record existed.
  * Used by closeSession() to plant a tombstone that races against in-flight
  * saveSession() calls.
  */
@@ -171,15 +185,11 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
   // Caller-provided probes may re-enter the store, so evaluate them before
   // taking the non-reentrant Atomics commit lock. A veto must also precede
   // pending-save cancellation so debounce durability remains intact.
-  if (_runtimeLivenessVeto(id, options) || _heartbeatLivenessVeto(id, options)) return null;
+  if (_runtimeLivenessVeto(id, options)) return null;
   const closeGuard = _guardedSaveOptions(id);
   const commitControl = _acquireWriteCommit(closeGuard);
   if (commitControl === false) return null;
   try {
-    // Cross-process heartbeat revival after full-TTL silence is accepted as a
-    // best-effort race: the tombstone resurrection guard is the authoritative
-    // post-race arbiter. Re-stat here, but never invoke caller code under lock.
-    if (_heartbeatLivenessVeto(id, options)) return null;
     const authority = _readLifecycleAuthority(id, reason, 'close');
     if (authority === LIFECYCLE_AMBIGUOUS) return null;
     // Only a committed close may disrupt pending persistence.
@@ -187,7 +197,7 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
     _cancelSessionWrites(id);
     _uncacheSessionSummary(id);
     const existing = loadSession(id);
-    if (!existing) return null;
+    if (!existing) return _recordAbsent(options);
     // Re-close idempotence: a session that is ALREADY tombstoned keeps its
     // ORIGINAL close time (updatedAt) and generation. The old code refreshed
     // updatedAt=Date.now() on every call, so the 5-min idle sweep re-closing a
@@ -216,7 +226,7 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
     const tombstone = {
       ...base,
       closed: true,
-      closedReason: alreadyClosed ? base.closedReason || reason : reason,
+      closedReason: alreadyClosed && reason !== 'desktop-session-delete' ? base.closedReason || reason : reason,
       status: 'closed',
       generation: newGen,
       updatedAt: closeTime,
@@ -226,8 +236,6 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
     _savePending.delete(id);
     clearSessionSaveError(id);
     _clearLiveSession(id);
-    // Preserve a sidecar published strictly after the sweep's scan snapshot.
-    _deleteHeartbeatUnlessNewer(id, options);
     _queueSessionSummaryUpsert(tombstone);
     _droppedSaveIds.delete(id);
     // Emit the close metric only on the FIRST close — a re-close of an
@@ -243,7 +251,7 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
 /**
  * Bump a session's generation WITHOUT planting a closed:true tombstone.
  * Used by closeSession(id, reason, { tombstone: false }) — the runtime side
- * (heartbeat, bash shells, controller, in-memory entry) is detached, but the
+ * (bash shells, controller, in-memory entry) is detached, but the
  * session file itself stays valid/resumable. The generation bump alone is
  * what protects it from a late save race: any saveSession() still in flight
  * from the detached turn was issued with the OLD generation as its
@@ -253,7 +261,7 @@ export function markSessionClosed(id, reason = 'manual', options = {}) {
  * of clobbering whatever the resumed session writes next.
  * Returns the new generation, or null if the session file doesn't exist.
  */
-export function bumpSessionGeneration(id, reason = 'detach') {
+export function bumpSessionGeneration(id, reason = 'detach', options = {}) {
   clearSessionLifecycleCommitError(id);
   // The detach barrier is a canonical write and MUST take the same commit
   // lock as markSessionClosed. Cancellation alone is not a barrier: a writer
@@ -278,14 +286,13 @@ export function bumpSessionGeneration(id, reason = 'detach') {
     _cancelSessionWrites(id);
     _uncacheSessionSummary(id);
     const existing = loadSession(id);
-    if (!existing) return null;
+    if (!existing) return _recordAbsent(options);
     const newGen = (typeof existing.generation === 'number' ? existing.generation : 0) + 1;
     const detached = { ...existing, generation: newGen, updatedAt: Date.now(), detachedReason: reason };
     if (!_writeLifecycleRecord(id, detached, existing, reason)) return null;
     _savePending.delete(id);
     clearSessionSaveError(id);
     _clearLiveSession(id);
-    deleteHeartbeat(id);
     _queueSessionSummaryUpsert(detached);
     _droppedSaveIds.delete(id);
     return newGen;

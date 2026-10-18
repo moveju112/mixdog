@@ -127,6 +127,78 @@ test('a cold selected route never flashes its raw id or Select model while the f
   }
 });
 
+for (const [id, levels] of [
+  ['command-code/deepseek/deepseek-v4.1-flash', ['low', 'medium', 'high', 'xhigh', 'max']],
+  ['google-antigravity/gemini-3.8-flash', ['low', 'medium', 'high']],
+]) {
+  test(`full catalog controls survive reopening and remounting ${id}`, async () => {
+    const provider = 'custom-catalog-authority';
+    const fullModel = {
+      ...model,
+      provider,
+      model: id,
+      display: id,
+      fastCapable: false,
+      effortOptions: levels.map((value) => ({ value, label: value })),
+      contextWindow: 450000,
+    };
+    const quickModel = { ...fullModel, effortOptions: [], contextWindow: 0 };
+    const full = deferred();
+    const oldList = window.mixdogDesktop.listProviderModels;
+    window.mixdogDesktop.listProviderModels = ({ quick }) =>
+      quick ? Promise.resolve([quickModel]) : full.promise;
+    providerSetup = { api: [{ id: provider, authenticated: true, custom: true }] };
+    const host = document.createElement('main');
+    document.body.append(host);
+    let root = createRoot(host);
+    const selector = () =>
+      React.createElement(ModelSelector, {
+        provider,
+        model: id,
+        effort: 'medium',
+        fast: false,
+        fastCapable: false,
+        modelDisabled: false,
+        tuningDisabled: false,
+        invokeResult: (work) => work(),
+        applySnapshot() {},
+        onOpenSettings() {},
+      });
+    const row = (label) =>
+      [...document.querySelectorAll('.route-sheet-row')].find((button) =>
+        button.textContent.includes(label)
+      );
+    try {
+      await act(async () => root.render(selector()));
+      await act(async () => host.querySelector('.model-trigger').click());
+      assert.equal(row('Reasoning effort'), undefined, 'quick rows may initially lack tuning metadata');
+      await act(async () => full.resolve([fullModel]));
+      assert.ok(row('Reasoning effort'));
+      assert.ok(row('Context'));
+
+      await act(async () => row('Model').click());
+      assert.ok(row('Reasoning effort'), 'reopening Model must not restore the thin quick answer');
+      assert.ok(row('Context'));
+      await act(async () => row('Reasoning effort').click());
+      assert.deepEqual(
+        [...document.querySelectorAll('[role="menuitemradio"]')].map((button) => button.textContent),
+        levels
+      );
+
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      await act(async () => root.render(selector()));
+      await act(async () => host.querySelector('.model-trigger').click());
+      assert.ok(row('Reasoning effort'), 'a remount must retain the resolved full catalog');
+      assert.ok(row('Context'));
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      window.mixdogDesktop.listProviderModels = oldList;
+    }
+  });
+}
+
 test('fast mode stays optimistic until the authoritative snapshot paints', async () => {
   const host = document.createElement('main');
   document.body.append(host);
@@ -214,7 +286,8 @@ test('fast mode stays optimistic until the authoritative snapshot paints', async
   }
 });
 
-test('an installed Local Provider model appears without remounting the picker', async () => {
+for (const recovery of ['local-install', 'desktop-reconnect', 'proxy-poll']) {
+  test(`a mounted picker refreshes its provider setup and models after ${recovery}`, async (t) => {
   const host = document.createElement('main');
   document.body.append(host);
   const root = createRoot(host);
@@ -230,6 +303,17 @@ test('an installed Local Provider model appears without remounting the picker', 
     savedModelParameters: {},
   };
 
+  let retry;
+  if (recovery !== 'local-install') {
+    providerSetup = { managedByClient: true, unavailable: true, api: [], local: [] };
+  }
+  if (recovery === 'proxy-poll') {
+    const schedule = window.setInterval.bind(window);
+    t.mock.method(window, 'setInterval', (callback, ms, ...args) => {
+      if (ms === 7_000) { retry = callback; return 700007; }
+      return schedule(callback, ms, ...args);
+    });
+  }
   try {
     await act(async () =>
       root.render(
@@ -258,11 +342,14 @@ test('an installed Local Provider model appears without remounting the picker', 
 
     availableModels = [model, localModel];
     providerSetup = {
-      api: [{ id: 'openai', authenticated: true }],
-      local: [{ id: 'mixdog-local', detected: true, enabled: true }],
+      managedByClient: recovery !== 'local-install',
+      api: [{ id: 'openai', authenticated: true, usable: true }],
+      local: [{ id: 'mixdog-local', detected: true, enabled: true, usable: true }],
     };
     await act(async () => {
-      invalidateSharedModelCatalogRequest();
+      if (recovery === 'local-install') invalidateSharedModelCatalogRequest();
+      else if (recovery === 'desktop-reconnect') window.dispatchEvent(new window.Event('mixdog:remote-reconnected'));
+      else { assert.ok(retry, 'failed proxy setup schedules a retry'); retry(); }
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
@@ -281,6 +368,8 @@ test('an installed Local Provider model appears without remounting the picker', 
     host.remove();
   }
 });
+
+}
 
 for (const outcome of ['success', 'failure']) {
   test(`model selection closes immediately and a late ${outcome} cannot disturb a newer menu or preference`, async () => {

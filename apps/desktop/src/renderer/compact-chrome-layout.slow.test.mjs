@@ -3,6 +3,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import puppeteer from 'puppeteer-core';
+import { launchPuppeteerBrowser } from '../../../../src/runtime/shared/browser-launch.mjs';
 
 test('compact chrome preserves input growth, readable rows and accessible actions', async (t) => {
   const styles = await build({
@@ -10,14 +11,14 @@ test('compact chrome preserves input growth, readable rows and accessible action
       resolveDir: fileURLToPath(new URL('.', import.meta.url)),
       loader: 'css',
       contents:
-        '@import "./ui/tokens.css"; @import "./styles.css"; @import "./desktop.css"; @import "./desktop/composer-add-menu.css";',
+        '@import "./font-faces.css"; @import "./ui/tokens.css"; @import "./styles.css"; @import "./desktop.css"; @import "./desktop/composer-add-menu.css";',
     },
     outfile: 'compact-chrome.css',
     bundle: true,
     write: false,
     loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl', '.svg': 'dataurl' },
   });
-  const browser = await puppeteer.launch({
+  const browser = await launchPuppeteerBrowser(puppeteer, {
     ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }),
     headless: true,
   });
@@ -59,6 +60,7 @@ test('compact chrome preserves input growth, readable rows and accessible action
     </div>
     <div class="transcript-virtual-row-content" data-tag="UserMessage" id="question"></div>
     <div class="transcript-virtual-row-content" data-tag="AssistantPart" id="answer"></div>
+    <div class="transcript-virtual-row-content" data-tag="ToolActivity" data-step-before="true" id="answer-step"></div>
     <div class="transcript-turn-gap" id="turn-gap"></div>
     <div class="message-body" id="prose">한글 English</div>
   </body></html>`);
@@ -171,6 +173,7 @@ test('compact chrome preserves input growth, readable rows and accessible action
       return {
         question: style('#question').paddingBottom,
         answer: style('#answer').paddingBottom,
+        answerStep: style('#answer-step').paddingTop,
         turnGap: style('#turn-gap').height,
         font: style('#prose').fontSize,
         line: style('#prose').lineHeight,
@@ -179,7 +182,8 @@ test('compact chrome preserves input growth, readable rows and accessible action
     });
     assert.deepEqual(desktop, {
       question: '24px',
-      answer: '8px',
+      answer: '0px',
+      answerStep: '8px',
       turnGap: '20px',
       font: '15px',
       line: '24px',

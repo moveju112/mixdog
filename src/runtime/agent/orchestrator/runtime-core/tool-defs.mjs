@@ -2,6 +2,10 @@
 // Pure, self-contained schemas + the agent-hidden default helper; no runtime
 // closure dependencies.
 
+// One load_tool for every session, native and bridge, byte for byte: native
+// sessions register the named tools; bridge sessions (see tool-bridge.mjs)
+// get their definitions back and run them through call_tool. Native request
+// bytes must never change, so the bridge adds nothing to this definition.
 export const TOOL_SEARCH_TOOL = {
   name: 'load_tool',
   title: 'load_tool',
@@ -27,34 +31,118 @@ export const TOOL_SEARCH_TOOL = {
   },
 };
 
-export const CWD_TOOL = {
-  name: 'cwd',
-  title: 'Project',
+// Fixed tool bridge for non-native providers (see tool-bridge.mjs). The
+// description is static so the definition stays byte-stable: it never carries
+// catalog names, counts or listings.
+export const CALL_TOOL_TOOL = {
+  name: 'call_tool',
+  title: 'call_tool',
   annotations: {
-    title: 'Project',
+    title: 'call_tool',
     readOnlyHint: false,
-    destructiveHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+    agentHidden: true,
+  },
+  description:
+    'Run one tool that is available in this session but not directly exposed, with the arguments its schema requires. The call has the same permissions, approvals and result as calling that tool directly.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', minLength: 1, maxLength: 256, description: 'Exact tool name.' },
+      arguments: { type: 'object', description: 'Arguments for that tool.' },
+    },
+    required: ['name', 'arguments'],
+    additionalProperties: false,
+  },
+};
+
+// The fixed bridge for non-native providers: the shared load_tool plus call_tool.
+export const TOOL_BRIDGE_TOOLS = Object.freeze([TOOL_SEARCH_TOOL, CALL_TOOL_TOOL]);
+
+export const SESSION_TOOL = {
+  name: 'session',
+  title: 'Session',
+  annotations: {
+    title: 'Session',
+    readOnlyHint: false,
+    destructiveHint: true,
     idempotentHint: false,
     openWorldHint: false,
     agentHidden: true,
   },
-  trigger: 'Show or switch the active Project; not a shell-local cd.',
+  trigger: 'Session lookup/control, title, compact, fork, Project and worktrees.',
   description:
-    'Show or switch the active Project. list returns the registered projects (name, path); a project name instead of a path → list first, then set the matching path, ask only if several match. path must be an existing directory. A shell-local cd does not change the Project. merge-worktree / remove-worktree act on this session’s git worktree only when the user explicitly asks.',
+    'Inspect sessions or control another by exact ID, never a guessed one. send acknowledges queue intake, not completion. Cancel/delete and worktree actions require the user’s request. Other actions affect only the current session.',
   inputSchema: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['get', 'set', 'list', 'merge-worktree', 'remove-worktree', 'list-worktrees', 'prune-worktrees'],
+        enum: [
+          'status',
+          'list',
+          'read',
+          'send',
+          'cancel',
+          'delete',
+          'rename',
+          'compact',
+          'fork',
+          'set-project',
+          'list-projects',
+          'favorite',
+          'archive',
+          'merge-worktree',
+          'remove-worktree',
+          'list-worktrees',
+          'prune-worktrees',
+        ],
         description:
-          'get shows the active Project (default without path), set switches to path, list returns registered projects; merge-worktree merges this session’s worktree into the project folder’s checked-out branch, remove-worktree deletes it (returning to the project folder; call again if it reports WORKTREE_REMOVAL_INCOMPLETE); list-worktrees lists every managed worktree and who retains it; prune-worktrees removes clean, merged ones no session retains.',
+          'status defaults to current; list pages sessions; read returns latest items; send queues prompt; cancel stops the turn; delete removes the session. compact runs after this turn; fork copies it without switching. merge-worktree merges into the Project’s checked-out branch; remove-worktree returns to the Project (repeat on WORKTREE_REMOVAL_INCOMPLETE); list-worktrees includes retaining sessions; prune-worktrees removes only clean, merged, unretained worktrees.',
       },
-      path: { type: 'string', description: 'Existing directory to switch to (implies action=set).' },
+      title: { type: 'string', description: 'rename: new current-session title.' },
+      session_id: {
+        type: 'string',
+        description:
+          'ID from list; required for read/send/cancel/delete, optional for status. send/cancel/delete cannot target the caller.',
+      },
+      prompt: { type: 'string', description: 'send: message to enqueue; loads a cold session.' },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        description:
+          'list/read: maximum rows, default 25. Output: 8KiB per page, 12KiB for initial read tail; follow nextOffset/nextTextOffset for more.',
+      },
+      cursor: { type: 'string', description: 'list: returned nextCursor.' },
+      offset: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'read: newest items to skip, default 0 (tail). Use nextOffset for older pages; appends/rewinds shift positions.',
+      },
+      text_offset: {
+        type: 'integer',
+        minimum: 0,
+        description: 'read: UTF-16 text position from nextTextOffset; requires offset, limit:1, item_id.',
+      },
+      item_id: {
+        type: 'string',
+        description: 'read: returned item id; rejects a shifted position instead of reading another item.',
+      },
+      path: {
+        type: 'string',
+        description:
+          'Existing directory; implies set-project. Resolve names with list-projects first. Shell cd does not switch Project.',
+      },
+      compact: { type: 'boolean', description: 'fork: compact the copy.' },
       force: {
         type: 'boolean',
-        description: 'remove-worktree: delete even with uncommitted or unmerged work (only when the user says so).',
+        description: 'remove-worktree: allow uncommitted/unmerged work only when explicitly requested.',
       },
+      value: { type: 'boolean', description: 'favorite/archive: on or off.' },
     },
     additionalProperties: false,
   },
@@ -121,6 +209,7 @@ export function collectStandaloneToolDefs({
   tidyToolDefs = [],
   visualizeToolDefs = [],
   setupToolDefs = [],
+  askUserToolDefs = [],
   goalTools = [],
   agentTools = [],
   skillToolEnabled = true,
@@ -129,7 +218,7 @@ export function collectStandaloneToolDefs({
   const standaloneTools = [
     TOOL_SEARCH_TOOL,
     ...(skillToolEnabled ? [SKILL_TOOL] : []),
-    CWD_TOOL,
+    SESSION_TOOL,
     ...webSearchRuntimeTools.filter((tool) => tool?.public !== false),
     ...admitted(memoryToolDefs?.TOOL_DEFS, MEMORY_RUNTIME_TOOLS),
     ...admitted(codeGraphToolDefs?.CODE_GRAPH_TOOL_DEFS, CODE_GRAPH_RUNTIME_TOOLS),
@@ -141,6 +230,7 @@ export function collectStandaloneToolDefs({
     ...admitted(tidyToolDefs, TIDY_RUNTIME_TOOLS),
     ...admitted(visualizeToolDefs, VISUALIZE_RUNTIME_TOOLS),
     ...setupToolDefs,
+    ...askUserToolDefs,
     ...goalTools,
     ...agentTools,
   ];

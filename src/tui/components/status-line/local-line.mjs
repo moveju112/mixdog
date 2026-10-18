@@ -4,13 +4,13 @@
  */
 import { rgbSgr } from '../../../runtime/shared/statusline/ansi.mjs';
 import { measuredContextUsage, contextMeasurementLabel } from '../../../runtime/shared/context-measurement.mjs';
-import { displayModelName, shortenModelName } from '../../../runtime/shared/model-display.mjs';
+import { displayModelName, effortDisplayLabel, shortenModelName } from '../../../runtime/shared/model-display.mjs';
 import { theme } from '../../theme.mjs';
 import { normalizeStatuslineAnsi } from '../../statusline-ansi-bridge.mjs';
 // Cache-only synchronous read (never touches fs on the render path), so the
 // instant-local L2 can render the Shell segment itself instead of grafting it
 // out of the previous full line.
-import { shellJobsStatus } from '../../../runtime/shared/statusline/statusline-segments.mjs';
+import { shellJobsStatus, unconfirmedShellCount } from '../../../runtime/shared/statusline/statusline-segments.mjs';
 import { formatElapsed, num, terminalColumns, timeMs } from '../../../runtime/shared/statusline/statusline-format.mjs';
 import { isTerminalStatus } from './boot-schedule.mjs';
 
@@ -137,10 +137,18 @@ export function localStatusLineL2(
   const shellStatus = shellScope
     ? shellJobsStatus({ clientHostPid, sessionId: shellScope })
     : shellJobsStatus({ clientHostPid });
-  const shellCount = Number(shellStatus?.count) || 0;
+  // A shell whose termination is unconfirmed is not "running": it is held,
+  // with /shells as the way to inspect or release it.
+  const unconfirmed = unconfirmedShellCount(shellStatus);
+  const shellCount = (Number(shellStatus?.count) || 0) - unconfirmed;
   if (shellCount > 0) {
     const label = `Running ${shellCount} Shell${shellCount === 1 ? '' : 's'}`;
     l2Parts.push(`${spin} ${STATUS}${label}${RESET}${elapsedSuffix(shellStatus.elapsedLabel || '')}`);
+  }
+  if (unconfirmed > 0) {
+    const { WARNING } = statusColors();
+    const label = `⚠ ${unconfirmed} Shell${unconfirmed === 1 ? '' : 's'} termination unconfirmed`;
+    l2Parts.push(`${WARNING}${label}${RESET} ${SUBTLE}·${RESET} /shells`);
   }
   // `web_search` is the key the producers publish (session/active-tool-summary
   // and app/use-transcript-activity); the async full render reads the same key,
@@ -160,6 +168,7 @@ export function localBootStatusLine(args = {}) {
     model = '',
     effort = '',
     fast = false,
+    ultra = false,
     stats = null,
     contextWindow = 0,
     displayContextWindow = 0,
@@ -168,7 +177,9 @@ export function localBootStatusLine(args = {}) {
   const raw = String(model || '').trim();
   const { STATUS, SUBTLE } = statusColors();
   const display = shortenModelName(displayModelName(raw, provider, ''), terminalColumns());
-  const flags = [effort ? String(effort).toUpperCase() : '', fast === true ? 'FAST' : ''].filter(Boolean);
+  let speedLabel = '';
+  if (fast === true) speedLabel = ultra === true ? 'Ultrafast' : 'Fast';
+  const flags = [effort ? effortDisplayLabel(effort) : '', speedLabel].filter(Boolean);
   const modelBits = [display, ...flags].join(` ${SUBTLE}·${RESET} `);
   const ctxPct = measuredContextUsage({
     stats,

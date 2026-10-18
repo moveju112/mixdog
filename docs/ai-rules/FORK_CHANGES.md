@@ -1,7 +1,7 @@
 # Fork Changes Ledger
 
-Last upstream sync: **upstream/main / c088221d889a9ca2d8a3366b878df97604de5f5e**
-Upstream mobile baseline: **mobile-v0.1.14**
+Last upstream sync: **upstream/main / 81558aa4230744e504972e01cb248ec9369e35bc**
+Upstream mobile baseline: **mobile-v0.1.15**
 Baseline full commit: `ab53d8226e1d73594180d5026aa6f313fb45513b`.
 
 The ledger is append-preserving: retain retired entries and history. Marker and retirement requirements live in [FORK_RULES.md](FORK_RULES.md).
@@ -103,7 +103,7 @@ Every entry's baseline upstream commit is `ab53d8226` (`v1.2.0`, upstream mobile
 
 | Field | Value |
 |---|---|
-| Status | active |
+| Status | retired |
 | Files | `apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java` (`register`, `DRAWER_SWIPE_SCRIPT`) |
 | Summary | A document-start passive touch listener dispatches `mixdog:mobile-home` once when a single-finger drag moves right ≥60px and more than twice its vertical distance while the drawer is closed |
 | Upstream behavior | The phone session drawer opens only from the strip's home button (`apps/desktop/src/renderer/WorkspaceTabStrip.tsx` → `mixdog:mobile-home`, handled in `apps/desktop/src/renderer/app-shell-mobile-back.ts`) |
@@ -112,7 +112,7 @@ Every entry's baseline upstream commit is `ab53d8226` (`v1.2.0`, upstream mobile
 | Default decision | **Adopt upstream** (`원본 채택`) if upstream adds swipe-to-open; reapply if the event name or drawer DOM changes |
 | Coupling | Depends on `mixdog:mobile-home` toggling the drawer, `.sidebar-drawer-frame[data-state]` (`apps/desktop/src/renderer/app-root/AppSidebarDrawer.tsx`) and `data-mixdog-mobile-tabs`; check all three on every sync |
 | Evidence | `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:102`, `evidence: apps/mobile/android/app/src/main/java/io/mixdog/app/MixdogNativeHost.java:137` |
-| History | 2026-10-14 introduced for fork build `0.1.13.005` |
+| History | 2026-10-14 introduced for fork build `0.1.13.005`; 2026-10-18 retired with user approval: upstream `c4603bf8434919a9d84f9c1f1c71ac656bef4252` adds edge-swipe drawers; use the upstream edge gesture instead of the fork's anywhere-swipe injection |
 
 ## Fork-owned files (no markers required)
 
@@ -143,11 +143,15 @@ New rule/audit files under these owned paths extend this section's ownership wit
 | `mobile-v0.1.13` | 004 | `0.1.13.004` | `101304` | 2026-10-13 | release tag target | published | `mobile-v0.1.13.004` |
 | `mobile-v0.1.13` | 005 | `0.1.13.005` | `101305` | 2026-10-14 | release tag target | published | `mobile-v0.1.13.005` |
 | `mobile-v0.1.14` | 001 | `0.1.14.001` | `101306` | 2026-10-14 | `e0d8e2be4323c57938688d4334a6c85d7825e78d` | published; mobile checks, signature, version, ZIP integrity and public download verified; phone installation awaits user confirmation | `mobile-v0.1.14.001` |
+| `mobile-v0.1.15` | 001 | `0.1.15.001` | `101307` | 2026-10-18 | release tag target, upstream `81558aa4230744e504972e01cb248ec9369e35bc` | build/checks/signature/version/ZIP verified; publication pending | `mobile-v0.1.15.001` |
 
 On each authorized fork build append: upstream mobile version/tag, build number `NNN`, versionName, versionCode, build date, source, outcome and release tag (if published).
 Reserve numbers for builds even when publication fails; never reuse an `NNN` or a versionCode.
 
 ## Upstream sync history
+
+- 2026-10-18: merged upstream `81558aa4230744e504972e01cb248ec9369e35bc` (`mobile-v0.1.15`), no textual conflicts. User approved upstream behavior for collisions; F007 injection removed in favor of upstream edge swipes. F001 and F003–F006 retained. Native notification settings and download fallback adopted unchanged. Swipe UI is served by the paired PC; the PC host must also run the upstream implementation for that gesture to be available.
+- 2026-10-18: `npm ci`, `npm run check` (27 tests), `npm run test:java`, Android sync and signed release build passed with JDK 21 after restoring Gradle wrapper executable permission. APK `0.1.15.001` / `101307` certificate matches `0.1.14.001`; version and ZIP integrity verified. Size 26134009 bytes; SHA-256 `cf0b21e32b10e5c1bb9593c19e7408328c016a5b009baefee0cb1959b6ae80f9`. Device installation/runtime unverified; FCM remains unavailable.
 
 - 2026-10-14: integrated `upstream/main` at `c088221d889a9ca2d8a3366b878df97604de5f5e`. F002 retired under case a at upstream `ed5c9248ce0aeca653974d508cc7434fefc947a6`; F001 and F003–F007 remain active. Merge commit `e0d8e2be4323c57938688d4334a6c85d7825e78d` pushed to `origin/main`; release `mobile-v0.1.14.001` published at that source commit, phone installation awaiting user confirmation.
 - 2026-10-14: `npm run check` (27 tests), `npm run test:java` and signed release build passed with JDK 21. F003/F006/F007 coupling names and event/DOM contracts remain compatible. APK `0.1.14.001` / `101306` saved to `/home/ubuntu/project/mixdog-fork-dist/Mixdog-0.1.14.001.apk`; certificate matches the previous fork APK. SHA-256: `9993e04ada50dc6204321600aac688946959d846ee5629641eeff4eba35a87d9`. Signature verification reports the same unsigned META-INF metadata warning class as the previous APK; device installation and runtime testing were not performed.

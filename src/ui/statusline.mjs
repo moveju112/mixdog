@@ -31,7 +31,11 @@ import {
   num,
   formatElapsed,
 } from '../runtime/shared/statusline/statusline-format.mjs';
-import { shellJobsStatus, memoryCycleStatus } from '../runtime/shared/statusline/statusline-segments.mjs';
+import {
+  shellJobsStatus,
+  memoryCycleStatus,
+  unconfirmedShellCount,
+} from '../runtime/shared/statusline/statusline-segments.mjs';
 import {
   agentStatuslinePayload,
   classifyAgentWorkers,
@@ -197,6 +201,7 @@ export async function renderStatusline({
   model = '',
   effort = '',
   fast = false,
+  ultra = false,
   cwd = '',
   stats,
   sessionId,
@@ -223,6 +228,7 @@ export async function renderStatusline({
       model,
       effort,
       fast,
+      ultra,
       cwd,
       stats,
       sessionId,
@@ -233,7 +239,7 @@ export async function renderStatusline({
       ...displayArgs,
     });
   } catch {
-    return fallbackLine({ provider, model, effort, fast, cwd, stats, ...displayArgs });
+    return fallbackLine({ provider, model, effort, fast, ultra, cwd, stats, ...displayArgs });
   }
 }
 
@@ -244,6 +250,7 @@ function renderNativeStatusline({
   model = '',
   effort = '',
   fast = false,
+  ultra = false,
   stats,
   sessionId,
   contextWindow = 0,
@@ -275,7 +282,7 @@ function renderNativeStatusline({
 
   const sep = ` ${D}│${R} `;
   const l1Parts = [
-    formatModelSegment({ provider, model, effort, fast, cols }),
+    formatModelSegment({ provider, model, effort, fast, ultra, cols }),
     formatContextSegment(ctxPct, cols, s.currentContextSource),
     ...quotaSegmentsFor({ provider, model, effort, fast, sessionId, clientHostPid, gatewayStatus, cols }),
   ].filter(Boolean);
@@ -394,9 +401,15 @@ function activitySegments({ sessionId, clientHostPid, agentWorkers, agentJobs, a
     const n = runningWorkers.length;
     segment(`Running ${n} Agent${n === 1 ? '' : 's'}`, agentsElapsed(runningWorkers));
   }
-  if (shellStatus.count > 0) {
-    const n = shellStatus.count;
+  const unconfirmed = unconfirmedShellCount(shellStatus);
+  if (shellStatus.count - unconfirmed > 0) {
+    const n = shellStatus.count - unconfirmed;
     segment(`Running ${n} Shell${n === 1 ? '' : 's'}`, shellStatus.elapsedLabel);
+  }
+  if (unconfirmed > 0) {
+    parts.push(
+      `${YLW}⚠ ${unconfirmed} Shell${unconfirmed === 1 ? '' : 's'} termination unconfirmed${R} ${D}·${R} /shells`
+    );
   }
   const webSearch = webSearchActivity(activeTools, { sessionId, clientHostPid });
   if (webSearch.count > 0) segment('Web Searching', webSearch.elapsed);
@@ -664,6 +677,7 @@ function fallbackLine({
   model = '',
   effort = '',
   fast = false,
+  ultra = false,
   cwd: _cwd = '',
   stats,
   contextWindow = 0,
@@ -687,7 +701,7 @@ function fallbackLine({
   });
   const sep = ` ${D}│${R} `;
   const parts = [
-    formatModelSegment({ provider, model, effort, fast, cols }),
+    formatModelSegment({ provider, model, effort, fast, ultra, cols }),
     formatContextSegment(ctxPct, cols, s.currentContextSource),
   ].filter(Boolean);
   if (!parts.length) return statusSubtle('> mixdog');

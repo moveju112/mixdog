@@ -6,6 +6,9 @@ import { __mixdogMemoryLog } from '../memory-log.mjs';
  * Public API:
  *   ensurePgInstance(dataDir) → Promise<{ host, port, runtimeDir, pgdataDir }>
  *   stopPgForShutdown()       → Promise<void>  — call from server-main.mjs shutdown()
+ *   stopOwnedPgForShutdown()  → Promise<boolean> — a host stopping the cluster it ensured
+ *   installOwnedPgExitStop()  → void            — last-chance sync stop on process exit
+ *   pgClusterExists(dataDir)  → boolean         — initdb already ran for dataDir
  *
  * Uses process.mjs for startPg / stopPg / healthcheckPg (lazy-imported).
  *
@@ -17,7 +20,7 @@ import { __mixdogMemoryLog } from '../memory-log.mjs';
  */
 
 import { createServer } from 'node:net';
-import { unlinkSync, readFileSync, writeFileSync, renameSync, statSync, mkdirSync } from 'node:fs';
+import { existsSync, unlinkSync, readFileSync, writeFileSync, renameSync, statSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   discoveryPath as _pgDiscoveryPath,
@@ -51,6 +54,10 @@ let _live = null;
 let _ensureInFlight = null;
 /** Per-process flag — postgresql.conf reconcile attempted once per supervisor. */
 let _v2ReconcileTried = false;
+/** Set by stopOwnedPgForShutdown: this process is exiting, no further ensure. */
+let _ownedShutdownStarted = false;
+/** installOwnedPgExitStop registers its 'exit' hook once. */
+let _ownedExitStopInstalled = false;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const PG_PORT_MIN = 55432;
@@ -372,6 +379,16 @@ function readPostmasterInfo(pgdata) {
   }
 }
 
+// Async child run (never blocks the daemon loop): stdout on exit 0, else null.
+async function _execFileText(file, args) {
+  const { execFile } = await import('node:child_process');
+  return new Promise((resolveText) => {
+    execFile(file, args, { encoding: 'utf8', windowsHide: true, timeout: 15_000 }, (error, stdout) => {
+      resolveText(error ? null : String(stdout || ''));
+    });
+  });
+}
+
 /**
  * Best-effort process-name check: confirms the pid's comm name contains 'postgres'.
  * Falls back to true (alive) when the name cannot be determined.
@@ -383,19 +400,12 @@ async function isPostgresPid(pid) {
       return comm.includes('postgres');
     }
     if (process.platform === 'darwin') {
-      const { spawnSync } = await import('node:child_process');
-      const r = spawnSync('ps', ['-o', 'comm=', '-p', String(pid)], { encoding: 'utf8', windowsHide: true });
-      if (r.status === 0) return (r.stdout || '').trim().includes('postgres');
-      return true;
+      const out = await _execFileText('ps', ['-o', 'comm=', '-p', String(pid)]);
+      return out === null ? true : out.trim().includes('postgres');
     }
     if (process.platform === 'win32') {
-      const { spawnSync } = await import('node:child_process');
-      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
-        encoding: 'utf8',
-        windowsHide: true,
-      });
-      if (r.status === 0) return (r.stdout || '').toLowerCase().includes('postgres');
-      return true;
+      const out = await _execFileText('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+      return out === null ? true : out.toLowerCase().includes('postgres');
     }
   } catch {
     /* cannot read — fall back to alive */
@@ -463,8 +473,8 @@ function scheduleOrphanTempPostmasterSweep() {
   _orphanSweepStarted = true;
   const runSweep = () => {
     void _getPgProc()
-      .then(({ sweepOrphanTempPostmasters }) => {
-        const reaped = sweepOrphanTempPostmasters?.() || 0;
+      .then(async ({ sweepOrphanTempPostmasters }) => {
+        const reaped = (await sweepOrphanTempPostmasters?.()) || 0;
         if (reaped > 0) __mixdogMemoryLog(`[supervisor-pg] orphan sweep reaped ${reaped} temp postmaster(s)\n`);
       })
       .catch(() => {
@@ -534,9 +544,20 @@ async function tryReusePgInstance({ pgdata, runtimeDir, healthcheckPg, source = 
 
 // ── Internal: full ensure logic (runs exclusively via _ensureInFlight) ────────
 
+function _pgdataDir(dataDir) {
+  return join(dataDir, 'pgdata');
+}
+
+/** True once `dataDir` holds an initialized cluster (initdb ran). Before that
+ *  no store in it can hold rows, so a read may answer empty without starting
+ *  PostgreSQL — the first start downloads/extracts the runtime and runs initdb. */
+export function pgClusterExists(dataDir) {
+  return existsSync(join(_pgdataDir(dataDir), 'PG_VERSION'));
+}
+
 async function _doEnsure(dataDir) {
   const { healthcheckPg } = await _getPgProc();
-  const pgdata = join(dataDir, 'pgdata');
+  const pgdata = _pgdataDir(dataDir);
 
   // Resolve runtimeDir via runtime-fetcher (cache-hits immediately when already downloaded).
   const { ensureRuntime } = await import('../runtime-fetcher.mjs');
@@ -549,7 +570,7 @@ async function _doEnsure(dataDir) {
     _v2ReconcileTried = true;
     try {
       const { reconcileConfV2 } = await _getPgProc();
-      reconcileConfV2(runtimeDir, pgdata);
+      await reconcileConfV2(runtimeDir, pgdata);
     } catch (e) {
       __mixdogMemoryLog(`[supervisor-pg] reconcileConfV2 error (non-fatal): ${e?.message}\n`);
     }
@@ -696,6 +717,12 @@ async function _doEnsure(dataDir) {
  * @returns {Promise<{ host: string, port: number, runtimeDir: string, pgdataDir: string }>}
  */
 export function ensurePgInstance(dataDir) {
+  // Once this process began stopping the cluster it owns, nothing may start
+  // or re-attach one: a late connection-loss recovery would otherwise bring a
+  // postmaster back up right after the stop and leave it running past exit.
+  if (_ownedShutdownStarted) {
+    return Promise.reject(new Error('[supervisor-pg] process is shutting down; PG start refused'));
+  }
   // Every route to a live PG passes here — start, attach, reuse and the
   // in-process fast path — so this is the one place the sweep cannot be
   // skipped. Latched internally, so repeated calls schedule it only once.
@@ -801,5 +828,89 @@ export function stopPgForShutdownSync() {
   } catch {}
   // The postmaster is gone, so drop its advert too (same guarded clear as the
   // async path: never another live owner's); otherwise pg.json outlives the run.
-  patchActiveInstance({ pg_port: null, pg_started_at: null, pg_pgdata: null, pg_runtime_dir: null }, { timeoutMs: 1000 });
+  patchActiveInstance(
+    { pg_port: null, pg_started_at: null, pg_pgdata: null, pg_runtime_dir: null },
+    { timeoutMs: 1000 }
+  );
+}
+
+// ── Owned-cluster shutdown (a host that starts PG through its stores) ────────
+//
+// `pg_ctl start` daemonizes the postmaster outside the starting process tree,
+// so nothing ends it when that process exits: the process that brought a
+// cluster up (or adopted one whose owner died) owns stopping it. Unlike
+// stopPgForShutdown above, these never act on a cluster this process did not
+// ensure, and never on one a different live process owns (pg_owner_pid) —
+// that owner stops it on its own exit.
+
+/** `_live` cluster's advert is held by another live process. */
+function _liveClusterForeignOwned(snap) {
+  let advert = null;
+  try {
+    advert = _readPgAdvert();
+  } catch {}
+  if (!advert?.pg_pgdata || resolve(advert.pg_pgdata) !== resolve(snap.pgdata)) return false;
+  return _pgAdvertIsForeignLive(advert);
+}
+
+/**
+ * Graceful, bounded stop (`pg_ctl stop -m fast`) of the cluster this process
+ * ensured. Latches the process into shutdown first, so no later ensure can
+ * start another one. Resolves true when a cluster was stopped; rejects when
+ * pg_ctl failed (the 'exit' hook then retries synchronously).
+ */
+export async function stopOwnedPgForShutdown({ timeoutMs = 6_000 } = {}) {
+  _ownedShutdownStarted = true;
+  // A start still under way (pg_ctl start already spawned, readiness pending)
+  // publishes its cluster only when it settles; stopping before that would
+  // miss the postmaster it is about to own. Bounded: a cold first start can
+  // be a download.
+  if (_ensureInFlight) {
+    let timer = null;
+    await Promise.race([
+      _ensureInFlight.catch(() => {}),
+      new Promise((resolveWait) => {
+        timer = setTimeout(resolveWait, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+  const snap = _live;
+  if (!snap) return false;
+  if (_liveClusterForeignOwned(snap)) {
+    __mixdogMemoryLog(`[supervisor-pg] PG on port ${snap.port} is owned by another live process; leaving it running\n`);
+    _live = null;
+    return false;
+  }
+  const { stopPg } = await _getPgProc();
+  await stopPg({ runtimeDir: snap.runtimeDir, pgdataDir: snap.pgdata, timeoutMs });
+  _live = null;
+  __mixdogMemoryLog(`[supervisor-pg] owned PG on port ${snap.port} stopped on shutdown\n`);
+  patchActiveInstance(
+    { pg_port: null, pg_started_at: null, pg_pgdata: null, pg_runtime_dir: null },
+    { timeoutMs: 2000, syncRetries: 1 }
+  );
+  return true;
+}
+
+/** Last-chance synchronous stop for a process 'exit' hook: acts only while the
+ *  cluster this process ensured is still recorded as live (an exit the async
+ *  stop never reached, or one where it failed). */
+export function stopOwnedPgForShutdownSync() {
+  if (!_live) return;
+  stopPgForShutdownSync();
+  _live = null;
+}
+
+/** Register stopOwnedPgForShutdownSync on process 'exit', once. Cheap when this
+ *  process never ensures a cluster: the hook is then a no-op. */
+export function installOwnedPgExitStop() {
+  if (_ownedExitStopInstalled) return;
+  _ownedExitStopInstalled = true;
+  process.on('exit', () => {
+    try {
+      stopOwnedPgForShutdownSync();
+    } catch {}
+  });
 }

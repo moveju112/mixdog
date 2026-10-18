@@ -43,12 +43,11 @@ function summarizeTraceContents(contents) {
   return [...summaries.slice(0, 8), { omittedTurns: summaries.length - 12 }, ...summaries.slice(-4)];
 }
 
-// Gemini cachedContents API rejects prefixes below the model-specific minimum
-// (Gemini 2.0/2.5 = 2048 tokens, Gemini 3.x = 4096 tokens) with HTTP 400
-// "Cached content is too small". Estimating chars/4 ≈ tokens lets us skip the
-// roundtrip when the prefix cannot satisfy the invariant. Estimate undercount
-// is harmless (we attempt and get the same 400 we would have skipped); overcount
-// is harmless (we skip, fall back to implicit cache).
+// Gemini cachedContents API rejects prefixes below a model-specific minimum
+// with HTTP 400 "Cached content is too small". Estimating chars/4 ≈ tokens
+// lets us skip the roundtrip when the prefix cannot satisfy the invariant.
+// Estimate undercount is harmless (we attempt and get the same 400 we would
+// have skipped); overcount is harmless (we skip, fall back to implicit cache).
 export function _estimateGeminiCacheTokens(systemInstruction, geminiTools, contents) {
   let chars = 0;
   if (typeof systemInstruction === 'string') chars += systemInstruction.length;
@@ -67,8 +66,28 @@ export function _estimateGeminiCacheTokens(systemInstruction, geminiTools, conte
   return Math.ceil(chars / 4);
 }
 
+// Explicit-cache eligibility and minimum prefix size per model, from the
+// caching docs: explicit caching works on Gemini 3 and 2.5 and is not supported
+// from Gemini 4 onward; documented minimums are 4096 for Gemini 3.x and 2048
+// for 2.5 Flash/Pro. Other ids keep the conservative 4096 floor (skipping a
+// small prefix only falls back to the implicit cache, whereas a floor that is
+// too low would POST a create the server rejects every turn).
+const GEMINI_CACHE_MIN_TOKENS = 4096;
+
+// Minimum prefix tokens for an explicit cache, or null when the docs exclude
+// the model from explicit caching.
+export function geminiExplicitCacheMinTokens(model) {
+  const bare = String(model || '')
+    .replace(/^models\//i, '')
+    .toLowerCase();
+  const major = /^gemini-(\d+)/.exec(bare);
+  if (major && Number(major[1]) >= 4) return null;
+  if (/^gemini-2\.5-(?:pro|flash)(?!-lite)(?:-|$)/.test(bare)) return 2048;
+  return GEMINI_CACHE_MIN_TOKENS;
+}
+
 export function _geminiCacheMinTokens(model) {
-  return /^gemini-3/i.test(String(model || '')) ? 4096 : 2048;
+  return geminiExplicitCacheMinTokens(model) ?? GEMINI_CACHE_MIN_TOKENS;
 }
 
 export function _geminiCachePrefixCount(contents) {
@@ -110,6 +129,23 @@ const GEMINI_GLOBAL_CACHE_MAX_ENTRIES = 128;
 export const GEMINI_GLOBAL_CACHE_DELETE_GRACE_MS = 2 * 60 * 1000;
 const geminiGlobalCaches = new Map();
 export const geminiGlobalCacheCreates = new Map();
+// Models whose cachedContents.create the server refused as unsupported (not
+// a prefix or quota failure). No catalog publishes explicit-cache support, so
+// the server's own answer decides, once per process.
+const geminiExplicitCacheRefusedModels = new Set();
+
+export function markGeminiExplicitCacheRefused(model, err) {
+  if (err?.status !== 400) return false;
+  if (!/explicit caching is not supported/i.test(String(err?.message || ''))) return false;
+  geminiExplicitCacheRefusedModels.add(String(model || ''));
+  return true;
+}
+
+// True when explicit cache creates must not be attempted: the docs exclude the
+// model, or the server already refused it.
+export function geminiExplicitCacheRefused(model) {
+  return geminiExplicitCacheMinTokens(model) === null || geminiExplicitCacheRefusedModels.has(String(model || ''));
+}
 
 export function _geminiCredentialFingerprint(apiKey) {
   return traceHash(String(apiKey || ''));
@@ -224,20 +260,28 @@ export function _resolveGeminiCacheUsage({ usageMetadata, cachedContent, provide
     firstFinite(usageMetadata?.thoughtsTokenCount, usageMetadata?.thoughts_token_count);
   const hasExplicitPromptTokens =
     Object.hasOwn(usageMetadata || {}, 'promptTokenCount') || Object.hasOwn(usageMetadata || {}, 'prompt_token_count');
-  const inputTokens = hasExplicitPromptTokens ? promptTokens : Math.max(0, totalTokens - outputTokens);
-  const reportedCachedTokens = firstFinite(
+  // toolUsePromptTokenCount (tool-result prompt tokens) is billed as input and
+  // reported separately from promptTokenCount; cached tokens stay a subset of
+  // the prompt portion.
+  const toolUseTokens = firstFinite(usageMetadata?.toolUsePromptTokenCount, usageMetadata?.tool_use_prompt_token_count);
+  const inputTokens = hasExplicitPromptTokens ? promptTokens + toolUseTokens : Math.max(0, totalTokens - outputTokens);
+  const reportedCachedCount = [
     // generateContent UsageMetadata field.
     usageMetadata?.cachedContentTokenCount,
     usageMetadata?.cached_content_token_count,
     // Newer SDK convenience alias documented for implicit cache hits.
     usageMetadata?.totalCachedTokens,
-    usageMetadata?.total_cached_tokens
-  );
+    usageMetadata?.total_cached_tokens,
+  ]
+    .map((value) => (value == null ? NaN : Number(value)))
+    .find((value) => Number.isFinite(value) && value >= 0);
+  const reportedCachedTokens = reportedCachedCount ?? 0;
   const cachedFallbackTokens = cachedContent ? Number(providerState?.gemini?.cacheTokenSize || 0) || 0 : 0;
-  const rawCachedTokens = reportedCachedTokens > 0 ? reportedCachedTokens : cachedFallbackTokens;
+  // An explicit zero is a measured miss, not missing usage metadata.
+  const rawCachedTokens = reportedCachedCount ?? cachedFallbackTokens;
   const cachedTokens = inputTokens > 0 ? Math.min(rawCachedTokens, inputTokens) : rawCachedTokens;
   let cacheTokenSource = 'none';
-  if (reportedCachedTokens > 0) cacheTokenSource = 'usage_metadata';
+  if (reportedCachedCount !== undefined) cacheTokenSource = 'usage_metadata';
   else if (cachedFallbackTokens > 0) cacheTokenSource = 'cache_create_fallback';
   return {
     inputTokens,

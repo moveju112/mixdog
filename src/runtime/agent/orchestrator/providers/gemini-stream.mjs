@@ -26,6 +26,11 @@ import { createSdkStreamReader } from './gemini-sdk-stream/reader.mjs';
 import { createRestStreamWatchdogs } from './gemini-rest-stream/watchdogs.mjs';
 import { drainSseDataLines, sseDataPayload } from './gemini-rest-stream/sse-lines.mjs';
 import { noteAbandonedUsage } from '../../../shared/llm/usage-context.mjs';
+import {
+  applyGeminiErrorContract,
+  assertNoGeminiInBandError,
+  geminiFinishReasonKind,
+} from './gemini-error-contract.mjs';
 
 export const GEMINI_FIRST_BYTE_TIMEOUT_MS = resolveTimeoutMs(
   'MIXDOG_GEMINI_FIRST_BYTE_TIMEOUT_MS',
@@ -132,9 +137,16 @@ export function normalizeGeminiSdkError(err, label) {
   const transport = geminiSdkTransportError(err, label);
   if (transport) return transport;
   const stamped = stampGeminiRpcError(err);
-  return isGeminiSdkStreamParseError(stamped)
-    ? geminiStreamCorruptionError(`${label} corrupt SDK SSE JSON`, stamped)
-    : stamped;
+  if (isGeminiSdkStreamParseError(stamped)) {
+    return geminiStreamCorruptionError(`${label} corrupt SDK SSE JSON`, stamped);
+  }
+  if (!stamped || typeof stamped !== 'object') return stamped;
+  return applyGeminiErrorContract(stamped, {
+    details: stamped.details,
+    errorDetails: stamped.errorDetails,
+    googleStatus: stamped.geminiStatus,
+    message: stamped.message,
+  });
 }
 
 // CC-rule safety stamp for Gemini stream failures (provider-stall audit):
@@ -175,8 +187,10 @@ function stampGeminiStreamFailure(
   const visible = visibleText.length > 0;
   // Native functionCall chunks are only dispatched after successful stream
   // completion in gemini.mjs. Until then a reconnect is safe. Text-leaked
-  // calls are dispatched while parsing and remain a hard replay boundary.
-  const pendingTool = leaked;
+  // calls are dispatched while parsing and remain a hard replay boundary,
+  // unless the guard holds them back (`deferToolCalls`): a held call never
+  // runs when the stream fails, so a reconnect cannot double-execute it.
+  const pendingTool = leaked && textLeakGuard?.defersToolCalls !== true;
   try {
     if (visible) {
       err.liveTextEmitted = true;
@@ -225,25 +239,35 @@ export function geminiChunkProgressKind(chunk) {
  * (same shape as a non-streaming generateContent JSON body).
  * Mirrors @google/generative-ai aggregateResponses().
  */
-function aggregateGeminiStreamChunks(responses) {
-  const lastResponse = responses[responses.length - 1];
-  const aggregatedResponse = {
-    promptFeedback: lastResponse?.promptFeedback,
-  };
+function aggregateGeminiStreamChunks(responses, label = 'Gemini stream') {
+  // An error envelope anywhere in the stream — including after STOP — fails
+  // the turn instead of aggregating into a success.
+  for (const response of responses) assertNoGeminiInBandError(response, label);
+  const aggregatedResponse = {};
+  // Candidates are keyed by their own `index`; chunks that omit it fall back
+  // to the position inside that chunk's candidate list.
+  const candidatesByIndex = new Map();
   for (const response of responses) {
+    // Early block info must survive later chunks that carry none.
+    if (response?.promptFeedback) {
+      aggregatedResponse.promptFeedback = { ...aggregatedResponse.promptFeedback, ...response.promptFeedback };
+    }
     if (response?.candidates) {
-      let candidateIndex = 0;
-      for (const candidate of response.candidates) {
-        if (!aggregatedResponse.candidates) aggregatedResponse.candidates = [];
-        if (!aggregatedResponse.candidates[candidateIndex]) {
-          aggregatedResponse.candidates[candidateIndex] = { index: candidateIndex };
+      response.candidates.forEach((candidate, position) => {
+        const candidateIndex = Number.isInteger(candidate?.index) ? candidate.index : position;
+        if (!candidatesByIndex.has(candidateIndex)) candidatesByIndex.set(candidateIndex, { index: candidateIndex });
+        const aggCand = candidatesByIndex.get(candidateIndex);
+        // A later chunk that omits a field never erases an earlier value.
+        if (candidate.citationMetadata !== undefined) {
+          aggCand.citationMetadata = mergeStreamMetadata(aggCand.citationMetadata, candidate.citationMetadata);
         }
-        const aggCand = aggregatedResponse.candidates[candidateIndex];
-        aggCand.citationMetadata = candidate.citationMetadata;
-        aggCand.groundingMetadata = candidate.groundingMetadata;
-        aggCand.finishReason = candidate.finishReason;
-        aggCand.finishMessage = candidate.finishMessage;
-        aggCand.safetyRatings = candidate.safetyRatings;
+        if (candidate.groundingMetadata !== undefined) {
+          aggCand.groundingMetadata = mergeStreamMetadata(aggCand.groundingMetadata, candidate.groundingMetadata);
+        }
+        if (geminiFinishReasonKind(candidate.finishReason) !== 'none') aggCand.finishReason = candidate.finishReason;
+        if (candidate.finishMessage !== undefined) aggCand.finishMessage = candidate.finishMessage;
+        if (candidate.safetyRatings !== undefined) aggCand.safetyRatings = candidate.safetyRatings;
+        if (candidate.continuationToken !== undefined) aggCand.continuationToken = candidate.continuationToken;
         if (candidate.content?.parts) {
           if (!aggCand.content) {
             aggCand.content = {
@@ -262,19 +286,52 @@ function aggregateGeminiStreamChunks(responses) {
             aggCand.content.parts.push(newPart);
           }
         }
-        candidateIndex++;
-      }
+      });
     }
     if (response?.usageMetadata) aggregatedResponse.usageMetadata = response.usageMetadata;
+  }
+  if (candidatesByIndex.size) {
+    aggregatedResponse.candidates = [...candidatesByIndex.values()].sort((a, b) => a.index - b.index);
   }
   return aggregatedResponse;
 }
 
+// GroundingMetadata / CitationMetadata arrive in pieces while streaming and
+// are merged, not replaced: groundingChunks carry only the chunks not sent
+// before (appended as-is, so groundingSupports indices stay valid); every
+// other list is a de-duplicated union, nested objects merge, scalars take the
+// latest value.
+function mergeStreamMetadata(previous, next) {
+  if (!previous) return next;
+  if (!next || typeof next !== 'object') return previous;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined || value === null) continue;
+    const before = previous[key];
+    if (Array.isArray(value)) {
+      if (key === 'groundingChunks') {
+        merged[key] = [...(before || []), ...value];
+      } else {
+        const seen = new Set((before || []).map((item) => JSON.stringify(item)));
+        merged[key] = [...(before || []), ...value.filter((item) => !seen.has(JSON.stringify(item)))];
+      }
+    } else if (typeof value === 'object' && before && typeof before === 'object') {
+      merged[key] = { ...before, ...value };
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+// A stream that ends with no finishReason is unfinished, whatever it carried
+// (thoughts only, an empty body, even right after a tool result); only a
+// STOP that carries no text is a completed, empty answer.
 function assertGeminiStreamCompleted({ sawStreamChunk, finishReason, promptBlockReason, label }) {
   if (!sawStreamChunk) {
     throw geminiTruncatedStreamError(`${label} truncated: empty stream`);
   }
-  if (!finishReason && !promptBlockReason) {
+  if (geminiFinishReasonKind(finishReason) === 'none' && geminiFinishReasonKind(promptBlockReason) === 'none') {
     throw geminiTruncatedStreamError(`${label} truncated: no finishReason`);
   }
 }
@@ -316,13 +373,23 @@ function relayGeminiStreamText(t, { onTextDelta, textLeakGuard }) {
  * `part.text` streams. Mirrors the Anthropic OAuth guard: suppress tags from
  * visible text, synthesize known-tool calls, dispatch via onToolCall.
  */
-export function createGeminiTextLeakGuard({ knownToolNames, onTextDelta, onToolCall, onStreamDelta }) {
+export function createGeminiTextLeakGuard({
+  knownToolNames,
+  onTextDelta,
+  onToolCall,
+  onStreamDelta,
+  deferToolCalls = false,
+}) {
   const _knownTools = knownToolNameSet(knownToolNames);
   const _enabled = _knownTools.size > 0;
   const _isKnownTool = (name) => _knownTools.has(name);
   let leakBuffer = '';
   let relayedText = '';
   const leakedCalls = [];
+  // With `deferToolCalls`, recovered calls wait here until the caller has seen
+  // the response finish cleanly (releaseDeferredToolCalls); a failed response
+  // never runs them.
+  const deferredCalls = [];
   const dispatchedFingerprints = new Set();
 
   const dispatchLeakedCall = (recovered) => {
@@ -344,9 +411,12 @@ export function createGeminiTextLeakGuard({ knownToolNames, onTextDelta, onToolC
       arguments: args,
     };
     leakedCalls.push(call);
-    try {
-      onToolCall?.(call);
-    } catch {}
+    if (deferToolCalls) deferredCalls.push(call);
+    else {
+      try {
+        onToolCall?.(call);
+      } catch {}
+    }
     try {
       onStreamDelta?.('tool');
     } catch {}
@@ -372,6 +442,9 @@ export function createGeminiTextLeakGuard({ knownToolNames, onTextDelta, onToolC
   return {
     get enabled() {
       return _enabled;
+    },
+    get defersToolCalls() {
+      return deferToolCalls === true;
     },
     feedText(text) {
       if (!text) return;
@@ -411,6 +484,13 @@ export function createGeminiTextLeakGuard({ knownToolNames, onTextDelta, onToolC
     getLeakedToolCalls() {
       return [...leakedCalls];
     },
+    releaseDeferredToolCalls() {
+      for (const call of deferredCalls.splice(0)) {
+        try {
+          onToolCall?.(call);
+        } catch {}
+      }
+    },
     getRelayedText() {
       return relayedText;
     },
@@ -433,10 +513,21 @@ function createLeakGuardFinalizer(textLeakGuard) {
 // `unwrapChunk` adapts a transport that nests the Gemini payload one level
 // deeper. Cloud Code Assist (Antigravity) streams `{ response: { candidates … } }`
 // while the public API streams the candidates directly; everything downstream —
-// aggregation, leak guard, watchdogs — stays shared.
+// aggregation, leak guard, watchdogs — stays shared. `firstByteTimeoutMs` is
+// the wait for the first chunk once the response headers arrived.
 export async function consumeGeminiRestStreamResponse(
   response,
-  { signal, onStreamDelta, onTextDelta, textLeakGuard, label, unwrapChunk = null, onChunk = null, failureUsage = null }
+  {
+    signal,
+    onStreamDelta,
+    onTextDelta,
+    textLeakGuard,
+    label,
+    unwrapChunk = null,
+    onChunk = null,
+    failureUsage = null,
+    firstByteTimeoutMs = GEMINI_FIRST_BYTE_TIMEOUT_MS,
+  }
 ) {
   const unwrap =
     typeof unwrapChunk === 'function'
@@ -459,12 +550,15 @@ export async function consumeGeminiRestStreamResponse(
   const watchdogs = createRestStreamWatchdogs({
     reader,
     label,
-    firstByteTimeoutMs: GEMINI_FIRST_BYTE_TIMEOUT_MS,
+    firstByteTimeoutMs,
     timeoutError: geminiTimeoutError,
   });
   // One decoded chunk: collected for aggregation and relayed to every sink.
   const relayChunk = (rawChunk) => {
+    // In-band errors stay top level even on a transport that nests payloads.
+    assertNoGeminiInBandError(rawChunk, label);
     const parsed = unwrap(rawChunk);
+    assertNoGeminiInBandError(parsed, label);
     if (!sawStreamChunk) {
       sawStreamChunk = true;
       watchdogs.clearFirstByte();
@@ -530,12 +624,13 @@ export async function consumeGeminiRestStreamResponse(
     }
     const tail = sseDataPayload(buffer.trim());
     if (tail) {
+      let rawTail;
       try {
-        const [rawTail] = await parseProviderJsonBatch([tail]);
-        relayChunk(rawTail);
+        [rawTail] = await parseProviderJsonBatch([tail]);
       } catch (cause) {
         throw geminiStreamCorruptionError(`${label} corrupt SSE tail JSON`, cause);
       }
+      relayChunk(rawTail);
     }
   } catch (err) {
     finalizeLeakGuard();
@@ -558,7 +653,7 @@ export async function consumeGeminiRestStreamResponse(
     finalizeLeakGuard();
   }
 
-  const aggregated = aggregateGeminiStreamChunks(allChunks);
+  const aggregated = aggregateGeminiStreamChunks(allChunks, label);
   const finishReason = aggregated.candidates?.[0]?.finishReason || null;
   const promptBlockReason = aggregated.promptFeedback?.blockReason || null;
   // Truncation (no finishReason) after visible output must carry the same
@@ -566,7 +661,12 @@ export async function consumeGeminiRestStreamResponse(
   // above, so stamp here too (review High: transient TRUNCATED_STREAM would
   // otherwise replay/double-render live text via withRetry).
   try {
-    assertGeminiStreamCompleted({ sawStreamChunk, finishReason, promptBlockReason, label });
+    assertGeminiStreamCompleted({
+      sawStreamChunk,
+      finishReason,
+      promptBlockReason,
+      label,
+    });
   } catch (err) {
     throw stampGeminiStreamFailure(err, { relayedText, textLeakGuard, chunks: allChunks, failureUsage });
   }
@@ -636,6 +736,7 @@ export async function consumeGeminiSdkStream(
       if (signal?.aborted) throw abortError();
       if (step.done) break;
       reader.noteChunk();
+      assertNoGeminiInBandError(step.value, label);
       if (step.value) collectedChunks.push(step.value);
       try {
         onStreamDelta?.(geminiChunkProgressKind(step.value));
@@ -652,7 +753,7 @@ export async function consumeGeminiSdkStream(
     // locally; retain the SDK response path only for an empty collection.
     let raw;
     if (collectedChunks.length > 0) {
-      raw = aggregateGeminiStreamChunks(collectedChunks);
+      raw = aggregateGeminiStreamChunks(collectedChunks, label);
     } else {
       let response;
       try {
@@ -661,10 +762,16 @@ export async function consumeGeminiSdkStream(
         throw normalizeGeminiSdkError(err, label);
       }
       raw = response?.candidates ? response : response?.response || response;
+      assertNoGeminiInBandError(raw, label);
     }
     const finishReason = raw?.candidates?.[0]?.finishReason || null;
     const promptBlockReason = raw?.promptFeedback?.blockReason || null;
-    assertGeminiStreamCompleted({ sawStreamChunk: reader.sawStreamChunk, finishReason, promptBlockReason, label });
+    assertGeminiStreamCompleted({
+      sawStreamChunk: reader.sawStreamChunk,
+      finishReason,
+      promptBlockReason,
+      label,
+    });
     return raw;
   } catch (err) {
     reader?.clearFirstByte();

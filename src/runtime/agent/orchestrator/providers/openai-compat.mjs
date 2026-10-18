@@ -13,7 +13,14 @@ import {
   _shouldFallbackXaiWsToHttp,
 } from './openai-compat-xai.mjs';
 import { withEffortRejectionFallback } from './effort-rejection.mjs';
+import { applyCompatErrorContract } from './openai-compat-error-contract.mjs';
 import { sendCompatResponses } from './openai-compat-responses.mjs';
+import {
+  COMPAT_RETRY_POLICY,
+  COMPAT_RETRY_PROFILES,
+  XAI_COMPAT_RETRY_POLICY,
+  compatFirstResponseBudget,
+} from './openai-compat-retry-profile.mjs';
 import { sendCompatChat, recoverCompatNonStreaming } from './openai-compat-chat-send.mjs';
 import { sendXaiResponses, sendXaiResponsesWebSocket } from './openai-compat-xai-send.mjs';
 import {
@@ -71,9 +78,14 @@ export class OpenAICompatProvider {
     const baseURL = assertSafeBaseURL(config.baseURL || preset?.baseURL || 'http://localhost:8080/v1', name);
     const apiKey = resolveProviderApiKey(name, config) || 'no-key';
     this.name = name;
+    // A profiled provider's limits are final: no loop-level recovery cycles on top.
+    if (COMPAT_RETRY_PROFILES[name]) this.retryPolicy = name === 'xai' ? XAI_COMPAT_RETRY_POLICY : COMPAT_RETRY_POLICY;
     this.config = config;
     this.baseURL = baseURL;
     this.apiKey = apiKey;
+    // Whether Chat content blocks keep their Anthropic-style `cache_control`
+    // (OpenRouter documents it); a gateway that does not ignores or rejects it.
+    this.chatCacheControl = (config.chatCacheControl ?? preset?.chatCacheControl) === true;
     // Merge caller-supplied headers (config.extraHeaders) over the preset's.
     // Used e.g. by grok-oauth to inject the Grok CLI client headers for the
     // grok-build proxy. Backward-compatible: providers that pass no
@@ -92,6 +104,11 @@ export class OpenAICompatProvider {
         /* best-effort */
       }
     }
+  }
+  // First-response budget of a chat profile with its own first-byte window;
+  // null keeps the agent watchdog default.
+  firstResponseBudget() {
+    return compatFirstResponseBudget(this.name, this.config?.chatProfile);
   }
   get _preconnectFn() {
     return typeof this.config?.preconnectFn === 'function' ? this.config.preconnectFn : preconnect;
@@ -168,9 +185,19 @@ export class OpenAICompatProvider {
   }
   async _doSend(messages, model, tools, sendOpts) {
     const useModel = model || this.defaultModel;
-    return withEffortRejectionFallback(this.name, useModel, sendOpts || {}, this.config?.reasoningEffort, (opts) =>
-      this._sendWithOpts(messages, useModel, tools, opts)
-    );
+    try {
+      return await withEffortRejectionFallback(
+        this.name,
+        useModel,
+        sendOpts || {},
+        this.config?.reasoningEffort,
+        (opts) => this._sendWithOpts(messages, useModel, tools, opts)
+      );
+    } catch (err) {
+      // Every provider built on this transport (custom, grok, muse, mimo,
+      // command-code, local) leaves through here with the boundary contract.
+      throw applyCompatErrorContract(err);
+    }
   }
   async _sendWithOpts(messages, useModel, tools, opts) {
     // Re-warm a kept-alive socket to the provider origin before the turn so
@@ -242,7 +269,9 @@ export class OpenAICompatProvider {
     return fetchCompatModelItems(this);
   }
   async listModels() {
-    return listCompatModels(this);
+    // A failed /models request must surface; an empty list would be cached as
+    // a complete catalog by the shared catalog loader.
+    return listCompatModels(this, { throwOnError: true });
   }
   async isAvailable() {
     return isCompatProviderAvailable(this);

@@ -1,4 +1,4 @@
-import { useRef, type CSSProperties } from 'react';
+import { useRef } from 'react';
 import { conversationKeyDownCapture } from './conversation-support';
 import { ConversationTranscript } from './conversation-pane-transcript';
 import { useConversationPaintHandoff } from './conversation-pane-paint-handoff';
@@ -25,19 +25,19 @@ export function Conversation(props: ConversationProps) {
     activeProjectPath,
     draftMode = false,
     draftId = '',
-    onRoutePreferenceApplied,
     renderAssistantRow,
     readOnly = false,
     reviewActive = true,
     warmPaintHandoff = false,
     transcriptPending = false,
     onEntryRevealed,
+    onTranscriptHiddenChange,
   } = props;
   // Every effect below runs in the order its hook is called here: viewport,
   // approvals, paint handoff, prompt release (submission), timeline, quota.
   const routeSessionId = String(routeSnapshot.sessionId || '');
   const transcriptSessionKey = draftMode ? 'new-task' : String(routeSnapshot.sessionId || 'new-task');
-  const view = useConversationViewport({ readOnly, transcriptSessionKey, transcriptPending });
+  const view = useConversationViewport({ transcriptSessionKey, transcriptPending });
   // Pane-local session runtime addressing: abort and tool approvals always target the
   // session THIS surface renders, never the globally active route.
   const routeSessionIdRef = useRef('');
@@ -75,8 +75,9 @@ export function Conversation(props: ConversationProps) {
     pendingItems,
     optimisticActivityStartedAt,
     onEntryRevealed,
+    onTranscriptHiddenChange,
   });
-  const { renderTranscriptRow, retryTurnRef } = useConversationRowRenderer({
+  const { renderTranscriptRow } = useConversationRowRenderer({
     snapshot,
     disclosureScope: String(routeSnapshot.sessionId || 'new-task'),
     readOnly,
@@ -87,6 +88,7 @@ export function Conversation(props: ConversationProps) {
     settledTurnKeys: timeline.settledTurnKeys,
     optimisticActivityStartedAt,
     submit: actions.composerSubmit,
+    questionCard: readOnly ? null : approvals.questionCard,
   });
   const links = useConversationLinkSurfaces(props, {
     // Per-turn changed-files cards. A read-only view mounts none: their
@@ -100,13 +102,10 @@ export function Conversation(props: ConversationProps) {
     draftMode,
     snapshot,
     routeSnapshot,
-    routeSessionIdRef,
     settledItems,
     settledTurnKeys: timeline.settledTurnKeys,
     pendingPromptCount: pendingItems.length,
     actions,
-    retryTurnRef,
-    onRoutePreferenceApplied,
   });
   const routeProject = String(routeSnapshot.currentProject || routeSnapshot.project || routeSnapshot.cwd || '');
   const itemCount = source.liveItemCount + pendingItems.length;
@@ -115,7 +114,6 @@ export function Conversation(props: ConversationProps) {
     <section
       className={`conversation${readOnly ? ' conversation-read-only' : ''}`}
       ref={view.conversation}
-      style={{ '--composer-dock-height': `${view.composerDockHeight}px` } as CSSProperties}
       data-transcript-entering={timeline.transcriptRevealed ? undefined : 'true'}
       onKeyDownCapture={(event) =>
         conversationKeyDownCapture(event, {
@@ -143,16 +141,16 @@ export function Conversation(props: ConversationProps) {
         viewerDevice={approvals.viewerDevice}
         renderRow={renderTranscriptRow}
         itemCount={itemCount}
+        cover={props.transcriptCover}
       />
-      {/* The measured dock overlays the viewport. Its clearance belongs to
-          the same virtual geometry as the rows, not a second scroll writer. */}
+      {/* The dock is the column's in-flow sibling below the viewport: its
+          height changes resize the viewport, never the virtual geometry. */}
       {!readOnly && (
         <ConversationComposerDock
           {...props}
           draftMode={draftMode}
           draftId={draftId}
           reviewActive={reviewActive}
-          dockRef={view.composerDock}
           dropTargetRef={view.conversation}
           routeProject={routeProject}
           island={island}

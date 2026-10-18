@@ -6,7 +6,9 @@ import { ProjectContextSelector } from './composer-support';
 import { ComposerDock } from './ComposerDock';
 import type { ConversationProps } from './conversation-pane-props';
 import { useComposerUserMessages } from './conversation-pane-user-messages';
+import { questionAwareSubmit } from './question-card-logic';
 import type { RecordValue, Snapshot, TranscriptItem } from './desktop-types';
+import { t } from './i18n';
 import type { ConversationIsland } from './use-conversation-island';
 import type { ConversationSubmission } from './use-conversation-submission';
 
@@ -23,7 +25,6 @@ export type ConversationComposerDockProps = Pick<
   | 'activeProjectLabel'
   | 'onClearProject'
   | 'onSelectProject'
-  | 'onResumeSession'
   | 'draftWorkflow'
   | 'onDraftWorkflow'
   | 'draftOrchestrationMode'
@@ -41,7 +42,6 @@ export type ConversationComposerDockProps = Pick<
   draftMode: boolean;
   draftId: string;
   reviewActive: boolean;
-  dockRef: RefObject<HTMLDivElement | null>;
   dropTargetRef: RefObject<HTMLElement | null>;
   routeProject: string;
   island: ConversationIsland;
@@ -74,7 +74,6 @@ function conversationContextBar({
   activeProjectLabel,
   onClearProject,
   onSelectProject,
-  onResumeSession,
   draftWorkflow,
   onDraftWorkflow,
   draftOrchestrationMode,
@@ -95,7 +94,6 @@ function conversationContextBar({
         routeSnapshot.workspace?.revision ?? '',
         routeSnapshot.workspace?.cwd ?? '',
       ].join(':')}
-      onOpenSession={onResumeSession}
     />
   );
   return (
@@ -133,8 +131,8 @@ function conversationContextBar({
   );
 }
 
-/** The measured dock over the viewport: the island, the context bar, the
- *  review bar and the composer. */
+/** The dock below the viewport: the island, the context bar, the review bar
+ *  and the composer. */
 export function ConversationComposerDock(props: ConversationComposerDockProps) {
   const {
     snapshot,
@@ -156,7 +154,6 @@ export function ConversationComposerDock(props: ConversationComposerDockProps) {
     onOpenAgentSession,
     onClearToNewTask,
     onInheritSession,
-    dockRef,
     dropTargetRef,
     routeProject,
     island,
@@ -165,19 +162,27 @@ export function ConversationComposerDock(props: ConversationComposerDockProps) {
   const routeScope = String(routeSnapshot.sessionId || routeProject || 'new-task');
   const { actions } = submission;
   const userMessages = useComposerUserMessages(props.settledItems);
+  // A plain message sent while a question waits answers it (with the card's
+  // picks); an attachment or slash command closes the question and goes out
+  // as a new request the agent reads after it.
+  const { dismissQuestion, answerQuestion } = island;
+  const submit: typeof actions.composerSubmit =
+    dismissQuestion && answerQuestion
+      ? questionAwareSubmit(actions.composerSubmit, answerQuestion, dismissQuestion)
+      : actions.composerSubmit;
   return (
     <ComposerDock
-      dockRef={dockRef}
       sessionId={draftMode ? '' : String(snapshot.sessionId || '')}
       goalIsland={goalIsland}
       goalSubmissionId={submission.goalSubmissionId}
       approval={island.approval}
       islandFlash={island.islandFlash}
-      modelMismatch={island.modelMismatch}
-      quotaExhausted={island.quotaExhausted}
+      quotaCard={island.quotaCard}
       quotaResume={island.quotaResume}
       onOpenSessionDiff={onOpenSessionDiff}
       onOpenAgentSession={onOpenAgentSession}
+      workspace={draftMode ? null : (routeSnapshot.workspace ?? null)}
+      queuedInput={!draftMode && submission.composerQueued.length > 0}
       showProjectSelector={showProjectSelector}
       contextBar={conversationContextBar(props)}
       reviewItems={submission.reviewItems}
@@ -220,7 +225,9 @@ export function ConversationComposerDock(props: ConversationComposerDockProps) {
         onQueuedRestored={actions.composerQueuedRestored}
         promptRestore={draftMode ? null : (routeSnapshot.promptRestore ?? null)}
         userMessages={userMessages}
-        submit={actions.composerSubmit}
+        submit={submit}
+        answerQuestion={answerQuestion}
+        placeholderOverride={dismissQuestion ? t('Sending answers the question') : undefined}
         abort={actions.composerAbort}
         invokeResult={actions.composerInvokeResult}
         applySnapshot={actions.composerApplySnapshot}

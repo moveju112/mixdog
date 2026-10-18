@@ -3,9 +3,15 @@ import { type ReactNode, useState } from 'react';
 // @ts-expect-error Shared runtime module is plain ESM.
 import { describeError, safeErrorDetails } from '../../../../src/runtime/shared/error-presentation.mjs';
 import { t } from './i18n';
-import { localizeErrorCopy } from './error-notice-copy';
+import { localizeErrorCopy, localizeErrorRecovery, localizeToolSurfaceError } from './error-notice-copy';
 
 export { describeError, safeErrorDetails };
+
+/** The failure as ErrorNotice reads it: the persisted provider-kind descriptor
+ *  rides along with the text so only legacy items are classified from wording. */
+export function errorWithKind(text: string, errorKind: unknown): unknown {
+  return errorKind && typeof errorKind === 'object' ? { message: text, errorKind } : text;
+}
 
 /** The message a failure carried, without Electron's IPC envelope
  *  (`Error invoking remote method '…': Error: …`). */
@@ -16,8 +22,8 @@ export function errorMessageText(reason: unknown): string {
 }
 
 export function errorSummary(reason: unknown): string {
-  const { summary } = describeError(reason);
-  return localizeErrorCopy(summary);
+  const { summary, details } = describeError(reason);
+  return localizeToolSurfaceError(details)?.summary ?? localizeErrorCopy(summary);
 }
 
 // Google answers an account check with a one-time verification link buried in
@@ -61,11 +67,17 @@ export function ErrorNotice({
   if (!reasons.length) return null;
   const latest = describeError(reasons.at(-1));
   const total = count ?? reasons.length;
-  const summary = summaryOverride || localizeErrorCopy(latest.summary);
-  const recovery = summaryOverride ? '' : latest.recovery;
+  // The fixed tool-surface overflow carries its own sizes and remedy: shown as
+  // written, in the UI language, never as a generic "too large".
+  const toolSurface = localizeToolSurfaceError(latest.details);
+  const summary = summaryOverride || toolSurface?.summary || localizeErrorCopy(latest.summary);
+  const recovery = summaryOverride ? '' : toolSurface?.recovery || localizeErrorRecovery(latest);
   const details = reasons
     .slice(-50)
-    .map((reason) => describeError(reason).details)
+    .map((reason) => {
+      const detail = describeError(reason).details;
+      return localizeToolSurfaceError(detail)?.body ?? detail;
+    })
     .filter(Boolean);
   const hasDetails = details.length > 1 || (details[0] && details[0] !== summary);
   const verificationUrl = verificationUrlOf(reasons.at(-1));
@@ -89,7 +101,7 @@ export function ErrorNotice({
           </button>
         )}
       </div>
-      {recovery && <p className="error-notice-recovery">{localizeErrorCopy(recovery)}</p>}
+      {recovery && <p className="error-notice-recovery">{recovery}</p>}
       {(hasDetails || onRetry || action || verificationUrl) && (
         <div className="error-notice-actions">
           {hasDetails && (

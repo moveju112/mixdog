@@ -1,5 +1,6 @@
 import type { GithubRequest, GithubResult } from '../../../../src/runtime/github/contract.mjs';
 import type { FileDownloadApi } from './file-downloads';
+import type { ProjectRecoveryRequest, ProjectRecoveryResponse } from './project-recovery';
 import type { FileLaunchConfirmation, LocalLinkOpened } from './local-files';
 import type { DesktopFeedbackInput, DesktopFeedbackReceipt } from './contract-feedback';
 import type {
@@ -36,12 +37,15 @@ import type { ProviderModelsChange } from './provider-models';
 import type { SettingsChange } from './settings-changed';
 import type { HostDisplayPreferences } from './host-display-preferences';
 import type { TerminalSizeOwnerEvent } from './terminal-size-owner';
+import type { TerminalActivityEvent } from './terminal-activity';
+import type { DesktopTerminalRunRequest } from './terminal-command';
 import type {
   DesktopVisualizeEvent,
   DesktopVisualizeTabCommand,
   VisualizeCommandResult,
   VisualizePaneSource,
   VisualizePaneText,
+  VisualizeRemoteExport,
   VisualizeSessionState,
 } from './visualize';
 import type {
@@ -89,6 +93,11 @@ import type {
   DesktopGitGlobalConfigKey,
   DesktopGitIgnoreScope,
   DesktopGitLogEntry,
+  DesktopGitRequestContext,
+  DesktopGitReview,
+  DesktopGitReviewDiffRequest,
+  DesktopGitReviewDiffs,
+  DesktopGitReviewSource,
   DesktopGitStashEntry,
   DesktopGitStatus,
   DesktopGitStatusOptions,
@@ -156,6 +165,7 @@ export type { GithubRequest, GithubResult } from '../../../../src/runtime/github
 /** Small, last-writer-wins UI projection shared by Electron and paired web
  * clients. Pane geometry remains local; `selection` is the first visual pane. */
 export interface DesktopApi {
+  projectRecovery?(projectPath: string, request: ProjectRecoveryRequest): Promise<ProjectRecoveryResponse>;
   /** Immutable process timeline identity injected before renderer modules run. */
   readonly bootContext?: DesktopBootContext;
   /** The daemon connection this Electron window drives; absent on remote
@@ -417,17 +427,28 @@ export interface DesktopApi {
    *  runtime (the task tool's cancel). `stopped` is true only when the job was
    *  actually cancelled; unknown, finished or failed cancels carry `error`. */
   stopShellJob?(sessionId: string, taskId: string): Promise<{ stopped: boolean; error?: string }>;
+  /** Explicit "Release anyway" for a shell job whose termination is
+   *  unconfirmed: drops its workspace hold in the owning runtime. The caller
+   *  confirms with the user first. */
+  releaseShellJob?(sessionId: string, taskId: string): Promise<{ released: boolean; error?: string }>;
   /** Whether quota-stopped sessions resume by themselves at reset (default true). */
   getQuotaAutoResume(): Promise<boolean>;
   /** The device name this window's own actions are stamped with (the host's
    *  name locally, the paired client's name on a remote surface). */
   viewerDevice?(): Promise<string>;
+  /** Remote surface only: the uncapped output of one tool row whose output the
+   *  host cut for the phone (`remoteOutputTruncated`); null when it is gone. */
+  readTranscriptItem?(
+    sessionId: string,
+    itemId: string
+  ): Promise<{ id: string; result?: unknown; rawResult?: unknown; uiDiff?: unknown; withheld?: true } | null>;
   setQuotaAutoResume(enabled: boolean): Promise<boolean>;
   setSessionArchived?(sessionId: string, archived: boolean): Promise<void>;
   setSessionFavorite?(sessionId: string, favorite: boolean): Promise<void>;
-  /** Sidebar membership only: a registered project path, '' for no project,
-   *  null to follow the session's folder again. Never touches the cwd. */
-  setSessionProject?(sessionId: string, projectPath: string | null): Promise<void>;
+  /** Move a session to a registered project path ('' = no project, the task
+   *  workspace) by changing its working folder. Refused while its turn runs
+   *  or while it works in a managed worktree. */
+  setSessionProject?(sessionId: string, projectPath: string): Promise<void>;
   deleteSession(sessionId: string): Promise<SessionSnapshot>;
   /** /inherit — copy this conversation into a NEW session id that runs on the
    *  supplied (currently selected) model. The source session is left as it is,
@@ -527,9 +548,6 @@ export interface DesktopApi {
   closeConnectionWindow?(): Promise<void>;
   /** Shows Settings → Connection in this PC's window. */
   openConnectionSettings?(): Promise<void>;
-  /** "Keep allowing": this server window lets its server use this PC's
-   *  models again (a new grant). */
-  allowServerModelUse?(): Promise<void>;
   /** "Reopen server windows when the app starts" (this PC's window only). */
   getReopenServerWindows?(): Promise<boolean>;
   setReopenServerWindows?(enabled: boolean): Promise<boolean>;
@@ -613,6 +631,11 @@ export interface DesktopApi {
   subscribeTermData?(listener: (event: { id: string; data: string }) => void): () => void;
   /** A phone claimed, released or lost a PTY's size; other views follow or re-fit. */
   subscribeTermSizeOwner?(listener: (event: TerminalSizeOwnerEvent) => void): () => void;
+  /** Every live terminal whose command activity is known (integrated shells). */
+  termActivity?(): Promise<TerminalActivityEvent[]>;
+  /** This view shows `id` focused (renewed while it stays so) or left it. */
+  termFocus?(id: string, focused: boolean): void;
+  subscribeTermActivity?(listener: (event: TerminalActivityEvent) => void): () => void;
   /** Shells detected on this machine for the terminal strip's picker. */
   termProfiles?(): Promise<Array<{ id: string; label: string; path: string; default?: boolean }>>;
   /** Dock Git panel: plain git CLI over the active project directory. */
@@ -661,6 +684,8 @@ export interface DesktopApi {
   gitLog?(cwd: string, query?: string, skip?: number, limit?: number): Promise<DesktopGitLogEntry[]>;
   gitShow?(cwd: string, hash: string): Promise<DesktopGitCommitDetails>;
   gitShowDiff?(cwd: string, hash: string, path: string): Promise<string>;
+  /** Island Git request: read-only snapshot of status, diffs, history and the branch's PR. */
+  gitRequestContext?(cwd: string, input: { paths: string[]; base: string }): Promise<DesktopGitRequestContext>;
   /** Diff tab editor mode: file content at `HEAD`/`:0`/commit (null if absent). */
   gitShowFile?(cwd: string, rev: string, path: string): Promise<string | null>;
   /**
@@ -686,19 +711,18 @@ export interface DesktopApi {
   gitCreateTag?(cwd: string, tag: string, hash: string): Promise<string>;
   gitDeleteTag?(cwd: string, tag: string): Promise<string>;
   /** Check out `hash` itself: a detached HEAD. */
-  /** Review pane: cumulative diff of the working tree vs merge-base(origin default branch, HEAD). */
-  gitReview?(cwd: string): Promise<{
-    base: string;
-    files: Array<{
-      path: string;
-      status: string;
-      additions: number;
-      deletions: number;
-      untracked: boolean;
-      uncommitted: boolean;
-    }>;
-  }>;
-  gitReviewDiff?(cwd: string, path: string, untracked?: boolean): Promise<string>;
+  /**
+   * Changes view: the working tree (incl. untracked) vs merge-base(default branch, HEAD)
+   * for `branch` (default), or vs `HEAD` for `uncommitted`. Paths are repo-root-relative.
+   */
+  gitReview?(cwd: string, source?: DesktopGitReviewSource): Promise<DesktopGitReview>;
+  gitReviewDiff?(cwd: string, path: string, untracked?: boolean, source?: DesktopGitReviewSource): Promise<string>;
+  /** Batch `gitReviewDiff` (at most 512 files): one git diff plus untracked reads. */
+  gitReviewDiffs?(
+    cwd: string,
+    files: DesktopGitReviewDiffRequest[],
+    source?: DesktopGitReviewSource
+  ): Promise<DesktopGitReviewDiffs>;
   /** Review file context menu: OS-level reveal/open for a project-relative file. */
   revealFile?(cwd: string, path: string, accessToken?: string): Promise<void>;
   openFilePath?(
@@ -716,6 +740,18 @@ export interface DesktopApi {
    *  bounded original for a paired phone; null when missing, unreadable or not
    *  an image. */
   readAttachmentThumbnail?(attachmentRef: string): Promise<string | null>;
+  /** An attachment a message of this session carries, by id (the content hash
+   *  recorded in the message metadata, or an older image's own reference),
+   *  read from the host's attachment store as a `data:` URL. Rejects for an id
+   *  the session's transcript does not name. Desktop windows only. */
+  readSessionAttachment?(
+    sessionId: string,
+    attachmentId: string
+  ): Promise<{ name: string; mimeType: string; size: number; dataUrl: string }>;
+  /** A paired device: opens that attachment through the remote file preview —
+   *  a staged file on the PC plus a one-file grant scoped to the session
+   *  (`accessToken`), like any previewable file row. */
+  openSessionAttachment?(sessionId: string, attachmentId: string): Promise<DesktopLocalPathEntry>;
   /** Any `data:` attachment → OS app, keeping the (safe) extension of `name`. */
   openAttachmentFile?(dataUrl: string, name: string): Promise<void>;
   /** Writes a `data:` attachment to the temp dir and returns a one-file access
@@ -770,6 +806,12 @@ export interface DesktopApi {
   /** Agent browser bridge (desktop host only): retain the owning session's
    *  Browser surface and optionally reveal its dock for a foreground call. */
   onBrowserOpenRequested?(listener: (request: DesktopBrowserOpenRequest) => void): () => void;
+  /** Agent `terminal` tool (desktop host only): reveal a session's terminal
+   *  dock, opening a tab and entering `command` when it has none. */
+  onTerminalRunRequested?(listener: (request: DesktopTerminalRunRequest) => void): () => void;
+  /** Agent `terminal` tool: true while the tool call still waits on this
+   *  request, which makes the renderer's entering of its command final. */
+  claimTerminalRun?(requestId: string): Promise<boolean>;
   /** Agent `visualize` tool (desktop host only): a session's side-panel tabs
    *  changed, a reveal was asked for, or a web URL goes to the browser panel. */
   onVisualizeChanged?(listener: (event: DesktopVisualizeEvent) => void): () => void;
@@ -784,6 +826,22 @@ export interface DesktopApi {
   /** Paired web app only: one visualize pane's content, fetched over the
    *  encrypted RPC lane (pane URLs name the host's loopback servers). */
   visualizePaneSource?(sessionId: string, tabId: string, index: number): Promise<VisualizePaneSource>;
+  /** Paired web app only: a PDF or Office pane rasterized to page images
+   *  (a phone cannot show a PDF in a frame). */
+  visualizePanePages?(
+    sessionId: string,
+    tabId: string,
+    index: number,
+    options: { pages: number[]; maxWidth?: number }
+  ): Promise<DesktopDocumentPreviewPages>;
+  /** Paired web app only: render displayed pane `pane` as PNG / PDF on the
+   *  host and answer with the download source this device redeems. */
+  visualizeExport?(
+    sessionId: string,
+    tabId: string,
+    format: 'png' | 'pdf',
+    pane: number
+  ): Promise<VisualizeRemoteExport>;
   /** Desktop only: run the feedback page script (Comment pins, `data-choice`
    *  picks) in a visualize tab's loaded HTML panes. */
   visualizeFeedbackAttach?(sessionId: string, tabId: string): Promise<void>;

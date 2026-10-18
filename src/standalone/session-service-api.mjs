@@ -1,3 +1,5 @@
+import { shortId, slowSpans } from '../runtime/shared/slow-span.mjs';
+
 const sessionServiceRoutes = ({ desktop, project, session }) => ({
   'desktop.init': (params, ctx) => desktop.init(params, ctx),
   'desktop.invoke': (params, ctx) => desktop.invoke(params, ctx),
@@ -29,15 +31,19 @@ export function createSessionServiceApi({
   methods,
   getSize,
   getBusyCount,
+  getTurnBusyCount,
   getStatus,
   getExternalClientCount,
+  spans = slowSpans,
 }) {
   const routes = sessionServiceRoutes({ desktop, project, session });
   return {
     async handleCall(name, args = {}, ctx = null) {
       const route = routes[String(name || '')];
       if (!route) throw new Error(`unknown session service call ${name}`);
-      return route(args || {}, ctx);
+      const params = args || {};
+      const sid = shortId(params.sessionId);
+      return spans.trace(sid ? `${name}#${sid}` : String(name), () => route(params, ctx));
     },
     ...methods,
     get size() {
@@ -45,6 +51,10 @@ export function createSessionServiceApi({
     },
     get busyCount() {
       return getBusyCount();
+    },
+    /** Sessions with a running turn; background-task-only sessions excluded. */
+    get turnBusyCount() {
+      return getTurnBusyCount();
     },
     get status() {
       return getStatus();

@@ -65,11 +65,38 @@ test('the phone/web (remote) renderer routes file, folder, diff and jobs links i
   }
 });
 
+test('a close handoff presents the closed session only in the cold surface, never in a warm retained one', () => {
+  const renderer = createPaneConversationRenderer({
+    conversationHandoff: { kind: 'close', leafId: 'leaf-1', selection: { kind: 'session', id: 'closed' } },
+    resolvedDraftPrefsFor: () => ({ projectPath: '', modelSelection: null, workflow: null, orchestrationMode: 'none' }),
+    sessions: [],
+    registeredProjectPath: (path) => path,
+    projectChromeLabel: (path) => path,
+    paneSubmitFor: () => async () => undefined,
+    paneDraftSubmitFor: () => async () => undefined,
+    submit: async () => undefined,
+    openFileTab: () => {},
+    openAgentSession: () => {},
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    const cold = renderer({ kind: 'session', id: 'fallback' }, true, () => {}, 'leaf-1');
+    assert.equal(cold.props.handoffActive, true);
+    assert.equal(cold.props.conversationProps.sessionId, 'closed');
+    const warm = renderer({ kind: 'session', id: 'fallback' }, true, () => {}, 'leaf-1', true);
+    assert.equal(warm.props.handoffActive, false);
+    assert.equal(warm.props.conversationProps.sessionId, 'fallback');
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test('createPaneConversationRenderer builds conversation surface with appropriate titles and props', async () => {
   const { dom } = installTestDom(null, {
     html: '<!doctype html><html><body><div id="root"></div></body></html>',
     jsdom: { url: 'about:blank' },
-    expose: ['navigator', 'HTMLElement', 'Event', 'CustomEvent', 'MutationObserver'],
+    expose: ['navigator', 'HTMLElement', 'Element', 'Event', 'CustomEvent', 'MutationObserver'],
     actEnvironment: false,
   });
   globalThis.ResizeObserver = class {
@@ -80,6 +107,8 @@ test('createPaneConversationRenderer builds conversation surface with appropriat
   globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
   dom.window.requestAnimationFrame = globalThis.requestAnimationFrame;
   dom.window.cancelAnimationFrame = globalThis.cancelAnimationFrame;
+  // The composer island reads the reduced-motion preference.
+  dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   globalThis.window.mixdogDesktop = {
     invokeCapability: async () => ({}),
   };

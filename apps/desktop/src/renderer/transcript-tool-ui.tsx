@@ -40,7 +40,6 @@ import {
 } from './ScmContextMenu';
 import { ToolComputerReadinessCard } from './transcript-computer-card';
 import { usePersistedThumbnail } from './persisted-thumbnail';
-import { ToolVisualizeCards } from './transcript-visualize-card';
 import { rememberVisualizeTabTitles, visualizeCallTabTitle } from './visualize-card-model';
 import { useToolOutcomeUnknown } from './connection-link-store';
 import { MxIcon } from './MxIcon';
@@ -50,6 +49,7 @@ import { TurnChangesContext } from './TurnChangesCard';
 import { requestSessionDiffFile } from './session-diff-focus';
 import { capPatchLines } from './renderer-logic.mjs';
 import { CopyControl } from './transcript-primitives';
+import { FullToolOutputButton, useFullToolOutput } from './tool-full-output';
 import { TranscriptArtifacts } from './transcript-artifacts-ui';
 import { browserPageRequestsAvailable, requestBrowserPage } from './browser-page-request';
 import { useBrowserPageIdentity } from './browser-page-identity';
@@ -76,11 +76,15 @@ import {
   TOOL_DETAIL_LABELS,
   toolActivityIsCompleted,
   toolItemDone,
+  toolItemHasDiff,
   type ToolActivityBrowserPage,
   type ToolCardModel,
 } from './transcript-tool-model';
 // @ts-expect-error The shared runtime module is plain ESM and has no declaration file.
 import { classifyToolCategory, formatToolSurface } from '../../../../src/runtime/shared/tool-surface.mjs';
+// biome-ignore format: @ts-expect-error must precede the specifier
+// @ts-expect-error The shared runtime module is plain ESM and has no declaration file.
+import { formatElapsed as formatCardElapsed } from '../../../../src/runtime/shared/time-format.mjs';
 // biome-ignore format: @ts-expect-error must precede the specifier
 // @ts-expect-error The shared runtime module is plain ESM and has no declaration file.
 import { deriveToolCardModel, deriveToolOutcomeTone, splitLineDeltaTokens } from '../../../../src/runtime/shared/tool-card-model.mjs';
@@ -234,6 +238,33 @@ function ToolWorkingStatus({ startedAt, spark = false }: { startedAt: number; sp
   );
 }
 
+/** Live elapsed text since `startedAt` (from `minMs`), ticking on its own so
+ *  only this leaf re-renders each second. */
+const Elapsed = React.memo(function Elapsed({
+  startedAt,
+  prefix = '',
+  minMs = 1_000,
+}: {
+  startedAt: number;
+  prefix?: string;
+  minMs?: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: startedAt restarts the ticker and resets the clock.
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  const elapsedMs = Math.max(0, now - startedAt);
+  return elapsedMs >= minMs ? (
+    <>
+      {prefix}
+      {formatCardElapsed(elapsedMs) as string}
+    </>
+  ) : null;
+});
+
 type LineCounts = { additions: number; deletions: number };
 
 /** Lines a change adds and removes as one split pill ("+12 −3"). Both halves
@@ -333,7 +364,6 @@ export const ToolActivityGroup = React.memo(function ToolActivityGroup({
         </div>
       )}
       {browserPage && <ToolBrowserPageCard page={browserPage} sessionId={disclosureScope} />}
-      <ToolVisualizeCards items={items} sessionId={disclosureScope} />
       <ToolComputerReadinessCard items={items} taskKey={`${disclosureScope}|${turnKey}`} />
       <TranscriptArtifacts items={items} />
     </article>
@@ -399,6 +429,7 @@ function ToolBrowserPageCard({ page, sessionId }: { page: ToolActivityBrowserPag
     );
   }
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: wrapper only catches context-menu requests (right-click / menu key) bubbling from its child controls.
     <div
       className={`transcript-browser-page${thumbnail ? ' has-thumbnail' : ''}`}
       onContextMenu={(event) => {
@@ -1069,7 +1100,7 @@ function ToolActivityPreview({
 }
 
 function ToolActivityItem({
-  item,
+  item: shownItem,
   disclosureKey,
   defaultOpen,
   contentId,
@@ -1082,6 +1113,8 @@ function ToolActivityItem({
   scope: string;
 }) {
   const [open, onToggle, chosen, keepOpen] = useRememberedDisclosure(disclosureKey, defaultOpen);
+  const fullOutput = useFullToolOutput(scope, shownItem, open);
+  const item = fullOutput.item;
   const outcomeUnknown = useToolOutcomeUnknown()(item.id);
   const visualizeTabTitle = visualizeCallTabTitle(scope, item);
   const presentation = useMemo(() => {
@@ -1096,7 +1129,11 @@ function ToolActivityItem({
   // diff pane on that file (with the way back to the list), where a session
   // has that pane.
   const turnChanges = useContext(TurnChangesContext);
-  const diffPath = presentation.diffPatch && !presentation.pending ? diffTargetPath(presentation.diffPatch) : '';
+  const diffPath = presentation.pending
+    ? ''
+    : presentation.diffPatch
+      ? diffTargetPath(presentation.diffPatch)
+      : presentation.diffDigestPath;
   const openDiff =
     diffPath && turnChanges?.sessionId && turnChanges.onOpenSessionDiff
       ? () => {
@@ -1117,6 +1154,7 @@ function ToolActivityItem({
       {rendered &&
         presentation.hasDetails &&
         renderToolActivityDetails(presentation, contentId, chosen ? null : keepOpen, openDiff)}
+      {rendered && presentation.hasDetails && <FullToolOutputButton output={fullOutput} />}
     </article>
   );
 }
@@ -1127,12 +1165,6 @@ export function ToolCard({ item, disclosureScope = '' }: { item: TranscriptItem;
   const contentId = useId();
   const done = toolItemDone(item);
   const startedAt = Number(item.startedAt || 0);
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  useEffect(() => {
-    if (done || !startedAt) return;
-    const timer = window.setInterval(() => setNowTick(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [done, startedAt]);
   const callFailedCount = Math.max(0, Number(item.callErrorCount || 0));
   const exitFailedCount = Math.max(0, Number(item.exitErrorCount || 0));
   const denied = isHookApprovalDenialToolItem(item);
@@ -1158,14 +1190,17 @@ export function ToolCard({ item, disclosureScope = '' }: { item: TranscriptItem;
         categories: item.categories,
         doneCategories: item.doneCategories,
         headerFinalized: item.headerFinalized,
-        nowMs: nowTick,
+        // A pending card is derived at zero elapsed ("Running"); the ticking
+        // `<Elapsed>` leaf appends the live time, so the card never re-renders
+        // per second.
+        nowMs: done ? undefined : startedAt || undefined,
       }) as ToolCardModel,
-    [item, done, nowTick]
+    [item, done, startedAt]
   );
   const hasResult = typeof rawResult === 'string' ? Boolean(rawResult.trim()) : rawResult != null;
   const hasDetails = Boolean(model.detailLine);
   const count = Math.max(1, Math.round(Number(item.count || 1)));
-  const partialMutation = callFailedCount > 0 && typeof item.uiDiff === 'string' && Boolean(item.uiDiff.trim());
+  const partialMutation = callFailedCount > 0 && toolItemHasDiff(item);
   const outcomeTone = deriveToolOutcomeTone({
     pending: model.pending,
     groupCount: count,
@@ -1241,6 +1276,7 @@ export function ToolCard({ item, disclosureScope = '' }: { item: TranscriptItem;
                 <React.Fragment key={index}>{part.text}</React.Fragment>
               )
             )}
+            {model.detailIsPlaceholder && !done && startedAt > 0 && <Elapsed startedAt={startedAt} prefix=" · " />}
           </span>
         </div>
       )}

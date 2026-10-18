@@ -11,6 +11,9 @@
  * comes from `retrieveUserQuotaSummary`, not the per-model catalog counters.
  */
 import { makeModelCache } from './model-cache.mjs';
+import { isGeminiFamilyModel } from './gemini-family.mjs';
+import { isAntigravityClaude } from './antigravity-request.mjs';
+import { getModelMetadataSync } from '../../../shared/llm/model-catalog.mjs';
 import {
   ANTIGRAVITY_MODELS,
   PROJECT_ENDPOINT,
@@ -27,8 +30,9 @@ const TIER_EFFORTS = { 'extra low': 'minimal', minimal: 'minimal', low: 'low', m
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high'];
 // IDE-internal completion/chat models are listed without a display name.
 const INTERNAL_ID = /^(?:chat|tab)_/;
-// Bare Gemini 3 ids take the ordinary thinkingLevel field instead of a tier id.
-const BARE_GEMINI3_LEVELS = Object.freeze(['low', 'medium', 'high']);
+// The thinkingLevel values the gateway accepts on a single wire id; `minimal`
+// is an error there, so it is never offered even when a catalog lists it.
+const GATEWAY_THINKING_LEVELS = Object.freeze(['low', 'medium', 'high']);
 
 let _mirror = null;
 export const antigravityModelCache = makeModelCache({
@@ -116,6 +120,23 @@ function chatEntries(rawModels) {
   return out;
 }
 
+// A Gemini wire id without tier siblings takes the ordinary thinkingLevel field.
+// The ladder comes from the catalogs' row for the same Gemini id (models.dev /
+// LiteLLM) narrows what the gateway accepts; when no catalog declares a ladder
+// the gateway-accepted levels are offered and the server judges the value.
+// Only a model the gateway does not flag as thinking-capable has no levels.
+function bareThinkingLevels(wire, supportsReasoning) {
+  if (!supportsReasoning) return [];
+  // Claude behind the gateway takes the same thinkingLevel enum; no catalog
+  // describes these wire ids, so the gateway-accepted levels are offered.
+  if (isAntigravityClaude(wire)) return [...GATEWAY_THINKING_LEVELS];
+  if (!isGeminiFamilyModel(wire)) return [];
+  const effort = getModelMetadataSync(wire, 'gemini')?.reasoningOptions?.find((option) => option?.type === 'effort');
+  if (!Array.isArray(effort?.values) || !effort.values.length) return [...GATEWAY_THINKING_LEVELS];
+  const declared = new Set(effort.values.map((value) => String(value).toLowerCase()));
+  return GATEWAY_THINKING_LEVELS.filter((level) => declared.has(level));
+}
+
 /** Collapse the gateway's per-tier wire ids into picker records. */
 export function normalizeAntigravityCatalog(rawModels) {
   const families = new Map();
@@ -142,13 +163,13 @@ export function normalizeAntigravityCatalog(rawModels) {
       ? Object.fromEntries(efforts.map((effort) => [effort, pickWire(family.wires.get(effort), family.base)]))
       : pickWire(family.wires.get(efforts[0] ?? ''), family.base);
     const id = tiered ? key : wire;
-    const bareGemini3 = !tiered && /^gemini-3(?:\.\d+)?-(?:flash|pro)$/.test(wire);
     const display =
       tiered || !efforts.length ? family.base : `${family.base} (${efforts[0][0].toUpperCase()}${efforts[0].slice(1)})`;
     const kind = familyKind(family.base);
-    let reasoningLevels = [];
-    if (tiered) reasoningLevels = efforts;
-    else if (bareGemini3) reasoningLevels = [...BARE_GEMINI3_LEVELS];
+    // A lone labelled tier already names its effort in the wire id.
+    let reasoningLevels = efforts;
+    if (!efforts.length) reasoningLevels = bareThinkingLevels(wire, family.supportsReasoning);
+    else if (!tiered) reasoningLevels = [];
     models.push({
       id,
       name: display,
@@ -173,10 +194,22 @@ function antigravityCatalogModels() {
 }
 
 /**
+ * The catalog `family` ('gemini-pro', 'gemini-flash', 'gpt-oss') of a picker
+ * id or one of its wire ids, or null when no record carries one (Claude, or
+ * an id the catalog does not list).
+ */
+export function antigravityModelFamily(model, models = antigravityCatalogModels()) {
+  const id = String(model || '');
+  const wires = (entry) => (entry?.wire && typeof entry.wire === 'object' ? Object.values(entry.wire) : [entry?.wire]);
+  const record = models.find((entry) => entry?.id === id) || models.find((entry) => wires(entry).includes(id));
+  return typeof record?.family === 'string' && record.family ? record.family : null;
+}
+
+/**
  * Turn a picker model + effort into the wire id the gateway accepts. Tiered
- * families consume the effort (the id encodes it); a bare Gemini 3 id keeps it
- * for thinkingLevel; every other record drops it because the model has no
- * effort surface. Unknown ids pass through unchanged.
+ * families consume the effort (the id encodes it); a bare id whose record
+ * lists levels keeps it for thinkingLevel; every other record drops it
+ * because the gateway does not flag the model as thinking-capable. Unknown ids pass through unchanged.
  */
 export function resolveAntigravityWireModel(model, effort, models = antigravityCatalogModels()) {
   const id = String(model || '');
@@ -207,17 +240,34 @@ function quotaRow(label, bucket) {
   };
 }
 
-/** Shared Gemini 5H/7D rows from retrieveUserQuotaSummary. Missing fields stay omitted. */
+// The gateway's bucket ids; group names are display text and may change.
+const GEMINI_5H_BUCKET_ID = 'gemini-5h';
+const GEMINI_WEEKLY_BUCKET_ID = 'gemini-weekly';
+const ARGON_WEEKLY_BUCKET_ID = 'gemini-argon-wtu-weekly';
+// The "Claude and GPT models" group (Claude Opus, Claude Sonnet, GPT-OSS) has
+// its own pair of buckets, separate from the Gemini counters.
+const THIRD_PARTY_5H_BUCKET_ID = '3p-5h';
+const THIRD_PARTY_WEEKLY_BUCKET_ID = '3p-weekly';
+
+/**
+ * Gemini 5H/7D rows from retrieveUserQuotaSummary, the separate weekly limit
+ * of the Gemini 4 Argon group (its own group with only a weekly bucket), and
+ * the Claude/GPT-OSS 5H/7D pair. Rows are selected by bucket id and window.
+ * Missing fields stay omitted.
+ */
 export function antigravityQuotaWindows(summary) {
-  const groups = Array.isArray(summary?.groups) ? summary.groups : [];
-  const group = groups.find((entry) => entry && typeof entry === 'object' && entry.displayName === 'Gemini Models');
-  const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
-  let fiveHour = null;
-  let weekly = null;
-  for (const bucket of buckets) {
-    if (!bucket || typeof bucket !== 'object') continue;
-    if (!fiveHour && bucket.window === '5h') fiveHour = bucket;
-    if (!weekly && bucket.window === 'weekly') weekly = bucket;
-  }
-  return [quotaRow('5H', fiveHour), quotaRow('7D', weekly)].filter(Boolean);
+  const groups = (Array.isArray(summary?.groups) ? summary.groups : []).filter(
+    (entry) => entry && typeof entry === 'object'
+  );
+  const buckets = groups.flatMap((entry) => (Array.isArray(entry.buckets) ? entry.buckets : []));
+  const bucket = (id, window) =>
+    buckets.find((entry) => entry && typeof entry === 'object' && entry.bucketId === id && entry.window === window) ??
+    null;
+  return [
+    quotaRow('5H', bucket(GEMINI_5H_BUCKET_ID, '5h')),
+    quotaRow('7D', bucket(GEMINI_WEEKLY_BUCKET_ID, 'weekly')),
+    quotaRow('7D Argon', bucket(ARGON_WEEKLY_BUCKET_ID, 'weekly')),
+    quotaRow('5H Claude/GPT', bucket(THIRD_PARTY_5H_BUCKET_ID, '5h')),
+    quotaRow('7D Claude/GPT', bucket(THIRD_PARTY_WEEKLY_BUCKET_ID, 'weekly')),
+  ].filter(Boolean);
 }

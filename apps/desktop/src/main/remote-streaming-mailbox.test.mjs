@@ -2,6 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRemoteStreamingMailbox, REMOTE_STREAM_BATCH_MS } from './remote-streaming-mailbox.ts';
 import { createSnapshotDeltaEncoder, createSnapshotDeltaDecoder, markCompactWire } from './state-delta.ts';
+import { streamingPartialSuffix as desktopSuffix } from '../shared/streaming-partial.ts';
+import { streamingPartialSuffix as daemonSuffix } from '../../../../src/standalone/session-state-patch.mjs';
+
+test('the desktop and daemon partial-append suffix checks agree on every input', () => {
+  const line = { id: 'a', from: 3, text: 'abc' };
+  const cases = [
+    [line, { ...line, text: 'abcde' }],
+    [line, { ...line, text: 'abc' }],
+    [line, { ...line, text: 'ab' }],
+    [line, { ...line, text: 'xbcde' }],
+    [line, { ...line, from: 4, text: 'abcde' }],
+    [line, { ...line, id: 'b', text: 'abcde' }],
+    [line, { ...line, tail: { id: 'a' }, text: 'abcde' }],
+    [
+      { ...line, text: '' },
+      { ...line, text: 'x' },
+    ],
+    [line, { id: 'a', from: 3, text: 7 }],
+    [null, line],
+    [line, undefined],
+    ['abc', 'abcd'],
+    [[], []],
+  ];
+  for (const [before, after] of cases) assert.equal(desktopSuffix(before, after), daemonSuffix(before, after));
+  assert.equal(desktopSuffix(line, cases[0][1]), 'de');
+});
 
 function clock() {
   let now = 0;
@@ -37,7 +63,7 @@ const update = (text, fields = {}) => ({
   snapshot: { busy: true, items, streamingTail: { id: 'tail', kind: 'assistant', text }, ...fields },
 });
 
-test('a text burst sends one latest snapshot within 16ms, with every character preserved', () => {
+test('a text burst sends one latest snapshot per batch window, with every character preserved', () => {
   const time = clock();
   const frames = [];
   let mailbox;
@@ -104,6 +130,59 @@ test('backpressure cannot downgrade queued approval state and disconnect clears 
   assert.equal(frames.length, 2);
 });
 
+test('partial-line growth batches as a text append; a partial for another row does not', () => {
+  const time = clock();
+  const frames = [];
+  let mailbox;
+  mailbox = createRemoteStreamingMailbox((sequence, value, critical) => {
+    frames.push({ value, critical });
+    mailbox.acknowledge(sequence);
+  }, time.timers);
+  const partial = (text, from = 6, id = 'tail') => ({ streamingPartial: { id, from, text } });
+  mailbox.publish(update('line1\n'));
+  mailbox.publish(update('line1\n', partial('pa')));
+  mailbox.publish(update('line1\n', partial('partial')));
+  // The completed line moves the tail and restarts the partial after it.
+  mailbox.publish(update('line1\npartial line\n', partial('ne', 19)));
+  assert.equal(frames.length, 1);
+  time.advance(REMOTE_STREAM_BATCH_MS);
+  assert.equal(frames.length, 2);
+  assert.equal(frames[1].critical, false);
+  assert.deepEqual(frames[1].value.snapshot.streamingPartial, { id: 'tail', from: 19, text: 'ne' });
+  mailbox.publish(update('line1\npartial line\n', partial('x', 0, 'other')));
+  assert.equal(frames.length, 3);
+  assert.equal(frames[2].critical, true);
+});
+
+test('a decoder that predates streamingPartial keeps painting the line-gated tail', () => {
+  const encoder = createSnapshotDeltaEncoder({ compact: true });
+  const decoder = createSnapshotDeltaDecoder();
+  const send = (snapshot) => {
+    const wire = encoder.encode(snapshot);
+    if (!Object.hasOwn(wire, '__itemsRevision')) markCompactWire(wire);
+    const result = decoder.decode(wire);
+    assert.equal(result.ok, true);
+    return result.snapshot;
+  };
+  const tail = (text) => ({ id: 'tail', kind: 'assistant', text, streaming: true });
+  send({ busy: true, items, streamingTail: tail('one\n') });
+  const received = send({
+    busy: true,
+    items,
+    streamingTail: tail('one\n'),
+    streamingPartial: { id: 'tail', from: 4, text: 'tw' },
+  });
+  // The field travels as plain state; the tail itself is untouched.
+  assert.equal(received.streamingTail.text, 'one\n');
+  assert.deepEqual(received.streamingPartial, { id: 'tail', from: 4, text: 'tw' });
+  const settled = send({
+    busy: false,
+    items: [...items, { ...tail('one\ntwo'), streaming: false }],
+    streamingTail: null,
+  });
+  assert.equal(Object.hasOwn(settled, 'streamingPartial'), false);
+});
+
 test('batching reduces real compact packet bytes while preserving decoder state', () => {
   const time = clock();
   const encoder = createSnapshotDeltaEncoder({ compact: true });
@@ -129,8 +208,10 @@ test('batching reduces real compact packet bytes while preserving decoder state'
     mailbox.publish(update(text));
     time.advance(4);
   }
-  time.advance(16);
+  time.advance(REMOTE_STREAM_BATCH_MS);
   assert.equal(received.streamingTail.text, text);
-  assert.equal(packets, 26); // initial state + 25 text groups
+  // 100 updates over 400ms: the initial state plus one packet per 90ms window.
+  assert.equal(REMOTE_STREAM_BATCH_MS, 90);
+  assert.equal(packets, 6);
   assert.ok(bytes < 5000, `unexpected burst cost: ${bytes}`);
 });

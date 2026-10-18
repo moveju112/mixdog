@@ -138,6 +138,7 @@ function wireToolPolicyRefresh(boot) {
     getMode: () => rt.mode,
     getConfig: () => rt.config,
     getDataDir: () => dataDirOf(cfgMod),
+    getActiveTurnCount: () => rt.activeTurnCount || 0,
     modelStandaloneTools: boot.modelStandaloneTools,
     featureDisallowedTools: boot.featureDisallowedTools,
     loadCoreMemoryContext: boot.loadCoreMemoryContext,
@@ -231,7 +232,11 @@ function developerAdapters(boot) {
         reg.disableProvider?.(provider);
         return;
       }
-      await ensureProvidersReady(config?.providers || {});
+      // Provider init can take long (OAuth/network); the option is already saved
+      // and adopted, so the toggle must not wait on it.
+      void ensureProvidersReady(config?.providers || {}).catch((error) => {
+        console.warn(`[providers] ${provider} init after enabling failed: ${error?.message || error}`);
+      });
     },
   };
 }
@@ -452,7 +457,10 @@ function resourceApiFor(boot) {
     saveConfigAndAdopt: boot.saveConfigAndAdopt,
     connectConfiguredMcp: boot.connectConfiguredMcp,
     cancelMcpLogin: boot.cancelMcpLogin,
+    completeMcpLogin: boot.completeMcpLogin,
     clearMcpServerOAuth: (cfg) => boot.mcpClient.clearMcpServerOAuth(cfg),
+    getMcpServerOAuthState: (cfg) => boot.mcpClient.getMcpServerOAuthState(cfg),
+    probeMcpServerAuth: (cfg) => boot.mcpClient.probeMcpServerAuth(cfg),
     invalidatePreSessionToolSurface: boot.invalidatePreSessionToolSurface,
     refreshEmptySessionToolPolicy: boot.refreshEmptySessionToolPolicy,
     normalizeMcpServerInput: boot.normalizeMcpServerInput,
@@ -485,6 +493,7 @@ function modelRouteApiFor(boot) {
       rt.route = v;
     },
     getSession: () => rt.session,
+    getSessionGeneration: () => rt.sessionGeneration,
     setSession: boot.adoptSession,
     getAddressedSessionId: () => rt.addressedSessionId,
     getConfigHasSecrets: () => rt.configHasSecrets,
@@ -559,12 +568,18 @@ function workspaceApiFor(boot) {
     getReservedSessionId: () => rt.reservedSessionId,
     getCurrentCwd: () => rt.currentCwd,
     getDesktopSession: () => rt.desktopSession,
+    setDesktopSession: (next) => {
+      rt.desktopSession = next;
+    },
     getConfig: () => rt.config,
     createCurrentSession: (reason) => boot.createCurrentSession(reason),
-    applyResolvedCwd: (cwd) => boot.applyResolvedCwd(cwd),
-    persistSession: (session) => saveSession(session, { immediate: true }),
-    refreshWorkspaceContext: (session, cwd) =>
-      refreshWorkspacePrompt(session, cwd, { loadCoreMemoryContext: boot.loadCoreMemoryContext }),
+    applyResolvedCwd: (cwd, options) => boot.applyResolvedCwd(cwd, options),
+    // Durable save: on disk when it returns, throws when the write fails
+    // (immediate mode only queues it). Synchronous, so a transition never
+    // waits on the save worker, which may never come up.
+    persistSession: (session) => saveSession(session, { sync: true }),
+    refreshWorkspaceContext: (session, cwd, move) =>
+      refreshWorkspacePrompt(session, cwd, { loadCoreMemoryContext: boot.loadCoreMemoryContext, move }),
     invalidateCaches: () => {
       boot.invalidateContextStatusCache();
       boot.invalidatePreSessionToolSurface();
@@ -580,6 +595,7 @@ function workspaceApiFor(boot) {
 function sessionTurnApiFor(boot) {
   const { rt, tunables, remoteTranscript, routePreparation } = boot;
   return createSessionTurnApi({
+    applyPendingRoute: () => boot.modelRouteApi.applyPendingRoute(),
     prepareTurnWorkspace: boot.workspaceApi.prepareTurnWorkspace,
     admitTurnWorkspace: boot.workspaceApi.admitTurnWorkspace,
     getSession: () => rt.session,
@@ -591,6 +607,7 @@ function sessionTurnApiFor(boot) {
       rt.mode = v;
     },
     getActiveTurnCount: () => rt.activeTurnCount,
+    takePendingCompact: (sessionId) => rt.pendingCompactSessionIds?.delete(sessionId) === true,
     setActiveTurnCount: (v) => {
       rt.activeTurnCount = v;
     },
@@ -628,7 +645,7 @@ function sessionTurnApiFor(boot) {
     invalidatePreSessionToolSurface: boot.invalidatePreSessionToolSurface,
     refreshEmptySessionToolPolicy: boot.refreshEmptySessionToolPolicy,
     activeToolSurface: boot.activeToolSurface,
-    applyResolvedCwd: boot.applyResolvedCwd,
+    switchProject: boot.workspaceApi.switchProject,
     resolveCwdPath: boot.resolveCwdPath,
     agentStatusState: boot.agentStatusState,
     notificationListeners: boot.notificationListeners,

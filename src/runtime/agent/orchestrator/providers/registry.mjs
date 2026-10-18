@@ -24,7 +24,7 @@ const signatures = new Map();
 // preservation guard and the getProvider self-heal read it through these two
 // helpers so "usable right now" and "genuinely gone" are answered identically
 // in both places.
-const OAUTH_PROVIDER_NAMES = new Set([
+export const OAUTH_PROVIDER_NAMES = new Set([
   'anthropic-oauth',
   'openai-oauth',
   'grok-oauth',
@@ -179,6 +179,9 @@ const PROVIDER_MODULES = {
   openai: ['./openai-ws.mjs', 'OpenAIDirectProvider'],
   'mixdog-local': ['./mixdog-local.mjs', 'MixdogLocalProvider'],
   'opencode-go': ['./opencode-go.mjs', 'OpenCodeGoProvider'],
+  // Multi-wire preset gateways (wire-route.mjs picks the wire per model).
+  openrouter: ['./openrouter.mjs', 'OpenRouterProvider'],
+  deepseek: ['./deepseek.mjs', 'DeepSeekProvider'],
 };
 
 // User-defined providers (cfg.type === 'custom') are keyed by a generated
@@ -209,7 +212,7 @@ async function instantiateProvider(name, Ctor, cfg, proxyChannel = null) {
     return wrapProviderAdmission(createModelProxyProvider(name, cfg, proxyChannel ?? getModelProxyChannel()), name);
   }
   if (isCustomProviderConfig(name, cfg)) return wrapProviderAdmission(await Ctor(name, cfg), name);
-  if (Object.hasOwn(OPENAI_COMPAT_PRESETS, name) && name !== 'opencode-go') {
+  if (Object.hasOwn(OPENAI_COMPAT_PRESETS, name) && !Object.hasOwn(PROVIDER_MODULES, name)) {
     return wrapProviderAdmission(new Ctor(name, cfg), name);
   }
   return createAccountPoolProvider(name, () => wrapProviderAdmission(new Ctor(cfg), name));
@@ -494,6 +497,14 @@ export function providerInputExcludesCache(name) {
  */
 export function providerNativePdf(name) {
   return providerTakesNativePdf(providers.get(String(name || '').toLowerCase()));
+}
+/**
+ * Whether the named provider's adapter declares `consumesReadWindows`: it
+ * needs the structured clip report of read results. A pure lookup; a proxy
+ * stand-in carries the PC adapter's declared trait.
+ */
+export function providerConsumesReadWindows(name) {
+  return providers.get(String(name || '').toLowerCase())?.consumesReadWindows === true;
 }
 export function getAllProviders() {
   // Defensive copy — callers must not mutate the live registry or retain

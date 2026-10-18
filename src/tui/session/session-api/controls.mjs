@@ -67,6 +67,18 @@ export function createSessionControlsApi(bag) {
     stopShellJob: async (taskId) => {
       return (await runtime.stopShellJob?.(taskId)) ?? { stopped: false, error: 'shell job control is unavailable' };
     },
+    // Explicit force-release of a shell whose termination is unconfirmed:
+    // { released, error? }. Surfaces confirm with the user before calling.
+    releaseShellJob: async (taskId) => {
+      return (
+        (await runtime.releaseShellJob?.(taskId)) ?? { released: false, error: 'shell job control is unavailable' }
+      );
+    },
+    // This session's live shell jobs, each flagged when its termination is
+    // unconfirmed: { jobs }.
+    listShellJobs: async () => {
+      return (await runtime.listShellJobs?.()) ?? { jobs: [] };
+    },
     goalControl: async (args = {}) => {
       const result = await runtime.goalControl?.(args);
       if (['pause', 'stop'].includes(result?.action)) {
@@ -91,8 +103,8 @@ export function createSessionControlsApi(bag) {
       );
       return result;
     },
-    setCwd: (path, options = {}) => {
-      const next = runtime.setCwd(path);
+    setCwd: async (path, options = {}) => {
+      const next = await runtime.setCwd(path);
       // Republish up-arrow history for the NEW project: current session prompts
       // merged with the cwd-scoped persisted store for the new cwd.
       const sessionList = recomputePromptHistory(getState().items);

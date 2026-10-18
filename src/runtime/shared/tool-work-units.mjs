@@ -85,10 +85,12 @@ const TOOL_CATEGORY = new Map([
   ['visualize', 'Visualize'],
   ['list_mcp_resources', 'Setup'],
   ['list_mcp_resource_templates', 'Setup'],
-  ['cwd', 'Setup'],
+  ['cwd', 'Setup'], // legacy: old transcripts
+  ['session', 'Setup'],
   ['setup', 'Setup'],
   ['goal', 'Setup'],
   ['request_user_input', 'Setup'],
+  ['ask_user', 'Setup'],
   ['update_plan', 'Setup'],
   ['skill', 'Skill'],
   ['skill_execute', 'Skill'],
@@ -342,12 +344,18 @@ function officeUnit(a) {
 
 function visualizeUnit(a) {
   const action = String(a.action || '').toLowerCase();
-  if (action === 'capture') return unitDescriptor('Visualize', { count: 1, active: 'Capturing', done: 'Captured', noun: 'screenshot' });
-  if (action === 'export') return unitDescriptor('Visualize', { count: 1, active: 'Exporting', done: 'Exported', noun: 'file' });
-  if (action === 'annotate') return unitDescriptor('Visualize', { count: 1, active: 'Marking', done: 'Marked', noun: 'annotation' });
-  if (action === 'check') return unitDescriptor('Visualize', { count: 1, active: 'Checking', done: 'Checked', noun: 'page' });
-  if (action === 'inspect') return unitDescriptor('Visualize', { count: 1, active: 'Inspecting', done: 'Inspected', noun: 'page' });
-  if (action === 'close') return unitDescriptor('Visualize', { count: 1, active: 'Closing', done: 'Closed', noun: 'tab' });
+  if (action === 'capture')
+    return unitDescriptor('Visualize', { count: 1, active: 'Capturing', done: 'Captured', noun: 'screenshot' });
+  if (action === 'export')
+    return unitDescriptor('Visualize', { count: 1, active: 'Exporting', done: 'Exported', noun: 'file' });
+  if (action === 'annotate')
+    return unitDescriptor('Visualize', { count: 1, active: 'Marking', done: 'Marked', noun: 'annotation' });
+  if (action === 'check')
+    return unitDescriptor('Visualize', { count: 1, active: 'Checking', done: 'Checked', noun: 'page' });
+  if (action === 'inspect')
+    return unitDescriptor('Visualize', { count: 1, active: 'Inspecting', done: 'Inspected', noun: 'page' });
+  if (action === 'close')
+    return unitDescriptor('Visualize', { count: 1, active: 'Closing', done: 'Closed', noun: 'tab' });
   return unitDescriptor('Visualize', { count: 1, active: 'Showing', done: 'Showed', noun: 'artifact' });
 }
 
@@ -568,7 +576,7 @@ function gitStageUnit(a) {
 function cwdUnit(a) {
   const action = String(a.action || a.type || '').toLowerCase();
   // A bare `path` selects that Project even when action is omitted.
-  if (action === 'set' || (!action && a.path)) {
+  if (action === 'set' || action === 'set-project' || (!action && a.path)) {
     return unitDescriptor('Setup', {
       active: 'Selecting',
       done: 'Selected',
@@ -576,10 +584,43 @@ function cwdUnit(a) {
       effect: true,
     });
   }
-  if (action === 'list') {
+  if (action === 'list' || action === 'list-projects') {
     return unitDescriptor('Setup', { active: 'Listing', done: 'Listed', noun: 'project' });
   }
-  return unitDescriptor('Setup', { active: 'Checking', done: 'Checked', noun: 'working directory', pluralNoun: 'working directories' });
+  if (action === 'rename') {
+    return unitDescriptor('Setup', { active: 'Renaming', done: 'Renamed', noun: 'session', effect: true });
+  }
+  if (action === 'compact') {
+    return unitDescriptor('Setup', { active: 'Scheduling', done: 'Scheduled', noun: 'compaction', effect: true });
+  }
+  if (action === 'fork') {
+    return unitDescriptor('Setup', { active: 'Forking', done: 'Forked', noun: 'session', effect: true });
+  }
+  if (action === 'favorite' || action === 'archive') {
+    const off = a.value === false;
+    let words;
+    if (action === 'favorite') words = off ? ['Unfavoriting', 'Unfavorited'] : ['Favoriting', 'Favorited'];
+    else words = off ? ['Unarchiving', 'Unarchived'] : ['Archiving', 'Archived'];
+    const [active, done] = words;
+    return unitDescriptor('Setup', { active, done, noun: 'session', effect: true });
+  }
+  if (action.endsWith('-worktree') || action.endsWith('-worktrees')) {
+    return unitDescriptor('Setup', {
+      active: 'Managing',
+      done: 'Managed',
+      noun: 'worktree',
+      effect: !action.startsWith('list'),
+    });
+  }
+  if (action === 'status') {
+    return unitDescriptor('Setup', { active: 'Checking', done: 'Checked', noun: 'session' });
+  }
+  return unitDescriptor('Setup', {
+    active: 'Checking',
+    done: 'Checked',
+    noun: 'working directory',
+    pluralNoun: 'working directories',
+  });
 }
 
 const TOOL_UNITS = new Map([
@@ -689,13 +730,15 @@ const TOOL_UNITS = new Map([
   ['use_skill', skillUnit],
   ['code_graph', codeGraphUnit],
   ['request_user_input', () => unitDescriptor('Setup', { active: 'Asking', done: 'Asked', noun: 'user' })],
+  ['ask_user', () => unitDescriptor('Setup', { active: 'Asking', done: 'Asked', noun: 'user' })],
   ['update_plan', () => unitDescriptor('Setup', { active: 'Updating', done: 'Updated', noun: 'plan' })],
   ['list_mcp_resources', () => unitDescriptor('Setup', { active: 'Listing', done: 'Listed', noun: 'MCP resource' })],
   [
     'list_mcp_resource_templates',
     () => unitDescriptor('Setup', { active: 'Listing', done: 'Listed', noun: 'MCP resource template' }),
   ],
-  ['cwd', cwdUnit],
+  ['cwd', cwdUnit], // legacy: old transcripts
+  ['session', cwdUnit],
 ]);
 
 function mcpUnit(name, a) {

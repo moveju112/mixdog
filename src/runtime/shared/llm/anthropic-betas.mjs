@@ -2,7 +2,6 @@ import { EFFORT_BETA_HEADER } from './anthropic-effort.mjs';
 import { normalizeClaudeModelId } from './anthropic-thinking-contract.mjs';
 import { getModelMetadataSync } from './model-catalog.mjs';
 
-const EXTENDED_CACHE_TTL_BETA_HEADER = 'extended-cache-ttl-2025-04-11';
 const INTERLEAVED_THINKING_BETA_HEADER = 'interleaved-thinking-2025-05-14';
 const FAST_MODE_BETA_HEADER = 'fast-mode-2026-02-01';
 const TOOL_SEARCH_BETA_HEADER = 'advanced-tool-use-2025-11-20';
@@ -13,16 +12,17 @@ export const SERVER_SIDE_FALLBACK_BETA_HEADER = 'server-side-fallback-2026-07-01
 // `speed: "fast"` and Opus 4.6 silently runs at standard speed.
 const KNOWN_FAST_MODE_MODELS = /^claude-opus-(?:4-8|5)(?:$|[-@])/;
 
-// The id pattern is the offline floor. A model the pricing catalog declares
-// Fast-capable is accepted too, so a later release needs no edit here.
+// The catalog's declaration (true or false) decides; the id pattern is only
+// the offline floor for a model the catalog says nothing about.
 export function supportsAnthropicFastMode(model) {
   const id = normalizeClaudeModelId(model);
   if (!id) return false;
-  return KNOWN_FAST_MODE_MODELS.test(id) || getModelMetadataSync(id, 'anthropic')?.supportsFastMode === true;
+  const declared = getModelMetadataSync(id, 'anthropic')?.supportsFastMode;
+  return typeof declared === 'boolean' ? declared : KNOWN_FAST_MODE_MODELS.test(id);
 }
 
 export function buildAnthropicBetaHeaders({
-  base = `${INTERLEAVED_THINKING_BETA_HEADER},${EXTENDED_CACHE_TTL_BETA_HEADER}`,
+  base = INTERLEAVED_THINKING_BETA_HEADER,
   fastMode = false,
   toolSearch = false,
   effort = false,

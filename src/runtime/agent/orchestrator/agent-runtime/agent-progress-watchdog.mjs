@@ -11,6 +11,7 @@ import { appendAgentTrace } from '../agent-trace-io.mjs';
 import { getHiddenAgent } from '../internal-agents.mjs';
 import { envNonNegativeInt, envPresent } from '../../../shared/env.mjs';
 import {
+  PROVIDER_FIRST_BYTE_TIMEOUT_MS,
   PROVIDER_SEMANTIC_IDLE_TIMEOUT_MS,
   PROVIDER_WS_SEMANTIC_IDLE_TIMEOUT_MS,
   STALL_TICK_MS,
@@ -45,7 +46,7 @@ export class AgentStallAbortError extends Error {
   }
 }
 
-function isAgentProgressWatchdogAbortError(err) {
+export function isAgentProgressWatchdogAbortError(err) {
   const msg = err?.message;
   return typeof msg === 'string' && WATCHDOG_ABORT_RE.test(msg);
 }
@@ -57,6 +58,25 @@ function assistantMessageText(content) {
     .filter((b) => b && (b.type === 'text' || b.type === 'output_text'))
     .map((b) => (typeof b.text === 'string' ? b.text : ''))
     .join('\n');
+}
+
+// Visible assistant text inside a providerReplay envelope. Item shapes by
+// provider: anthropic `{type:'text',text}`; openai/xai responses
+// `{type:'message',content:[{type:'output_text',text}]}`; gemini/antigravity
+// parts `{text}` (reasoning is `{thought:true,text}`). Reasoning/thinking and
+// tool items are skipped.
+function replayItemText(item) {
+  if (!item || typeof item !== 'object') return '';
+  if (item.type === 'message') return assistantMessageText(item.content);
+  if (item.type === 'text' || item.type === 'output_text' || (item.type === undefined && item.thought !== true)) {
+    return typeof item.text === 'string' ? item.text : '';
+  }
+  return '';
+}
+
+function providerReplayText(replay) {
+  const items = Array.isArray(replay?.items) ? replay.items : [];
+  return items.map(replayItemText).filter(Boolean).join('\n');
 }
 
 /** Message index at askSession start — salvage only assistant rows appended this run. */
@@ -72,7 +92,8 @@ function collectSessionAssistantHandoffText(session, messageStartIndex = 0) {
   for (let i = start; i < messages.length; i += 1) {
     const m = messages[i];
     if (m?.role !== 'assistant') continue;
-    const t = assistantMessageText(m.content).trim();
+    const contentText = assistantMessageText(m.content).trim();
+    const t = contentText || providerReplayText(m.providerReplay).trim();
     if (t && t !== '.') parts.push(t);
   }
   return parts.length ? parts.join('\n\n') : '';
@@ -80,9 +101,14 @@ function collectSessionAssistantHandoffText(session, messageStartIndex = 0) {
 
 export function watchdogPartialHandoffFromError(error, session, messageStartIndex = 0) {
   if (!isAgentProgressWatchdogAbortError(error)) return null;
-  // A canonical agent turn cannot expose its live transcript here, so it
-  // reads the text itself and carries it on the stall error.
-  if (typeof error.partialHandoff === 'string') return error.partialHandoff;
+  return turnPartialHandoff(error, session, messageStartIndex);
+}
+
+/** Assistant text a stopped turn produced before it stopped. A canonical agent
+ *  turn cannot expose its live transcript here, so it reads the text itself
+ *  and carries it on the turn's error. */
+export function turnPartialHandoff(error, session, messageStartIndex = 0) {
+  if (typeof error?.partialHandoff === 'string') return error.partialHandoff;
   return partialHandoffTextFromSession(session, messageStartIndex);
 }
 
@@ -178,14 +204,34 @@ function resolveExplicitMs(value, fallback) {
   return fallback;
 }
 
+// One deadline floored one watchdog tick above the provider's own budget for
+// that phase (none when the provider names none); 0 stays disabled.
+function aboveProviderBudget(requestedMs, providerBudgetMs) {
+  if (!(requestedMs > 0) || !(providerBudgetMs > 0)) return requestedMs;
+  return Math.max(requestedMs, providerBudgetMs + STALL_TICK_MS);
+}
+
+// `providerFirstByteTimeoutMs` is how long the session's provider itself may
+// wait for response headers, and `providerFirstOutputTimeoutMs` for its first
+// output (headers plus first chunk), its own retries included
+// (providerFirstResponseBudget). Provider retries keep the request clock
+// running, so each first-response deadline sits one watchdog tick above that
+// budget: the provider's timeout and retry decide first, and a provider that
+// gives up is reported as the provider's failure.
 export function resolveAgentWatchdogPolicy(agent, overrides = {}) {
-  const firstTransportMs = resolveExplicitMs(
-    overrides.firstTransportTimeoutMs ?? overrides.firstResponseTimeoutMs,
-    DEFAULT_FIRST_RESPONSE_TIMEOUT_MS
+  const firstTransportMs = aboveProviderBudget(
+    resolveExplicitMs(
+      overrides.firstTransportTimeoutMs ?? overrides.firstResponseTimeoutMs,
+      DEFAULT_FIRST_RESPONSE_TIMEOUT_MS
+    ),
+    resolveExplicitMs(overrides.providerFirstByteTimeoutMs, PROVIDER_FIRST_BYTE_TIMEOUT_MS)
   );
-  const firstSemanticMs = resolveExplicitMs(
-    overrides.firstSemanticTimeoutMs ?? overrides.firstVisibleTimeoutMs,
-    DEFAULT_FIRST_VISIBLE_CEILING_MS
+  const firstSemanticMs = aboveProviderBudget(
+    resolveExplicitMs(
+      overrides.firstSemanticTimeoutMs ?? overrides.firstVisibleTimeoutMs,
+      DEFAULT_FIRST_VISIBLE_CEILING_MS
+    ),
+    resolveExplicitMs(overrides.providerFirstOutputTimeoutMs, 0)
   );
 
   let idleStaleMs;

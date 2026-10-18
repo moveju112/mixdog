@@ -157,10 +157,17 @@ export async function exerciseBrowserInputSurface(options: {
         clipboard.writeText('browser copy fixture');
         for (const type of ['rawKeyDown', 'keyUp']) {
           await shell.debugger.sendCommand('Input.dispatchKeyEvent', {
-            type, key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers,
+            type,
+            key: 'c',
+            code: 'KeyC',
+            windowsVirtualKeyCode: 67,
+            modifiers,
           });
         }
-        await eventually(async () => clipboard.readText(), (value) => value === expected);
+        await eventually(
+          async () => clipboard.readText(),
+          (value) => value === expected
+        );
         assert.equal(await guest.executeJavaScript(`document.getElementById('agent').value`), 'manual 한글');
         assert.equal(await shell.executeJavaScript(`document.getElementById('draft').textContent`), 'keep editing');
       }
@@ -399,6 +406,11 @@ export async function exerciseBrowserInputSurface(options: {
     await exerciseBrowserErrorNotice(host, guest, shell, log);
     await exerciseBrowserPrompts(guest, shell, log);
     await shell.executeJavaScript('window.setSurfaceActive(false)');
+    // Unmounting the pane reports the page as undisplayed, which stops it
+    // painting (page-power). The viewport check reads pixels, so keep the
+    // page displayed once the unmount's own report has landed.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    host.setGuestActive('visible-session', guest.id, true);
     await exerciseBrowserViewportResolutions(host, guest, next, log);
     await shell.executeJavaScript('window.setSurfaceActive(false)');
     await exerciseBrowserTabHandover({ host, guest, shell, origin, command, log });

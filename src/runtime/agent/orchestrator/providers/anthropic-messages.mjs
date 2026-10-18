@@ -1,6 +1,6 @@
 // Anthropic model catalog + message conversion helpers.
 import { createRequire } from 'node:module';
-import { effortValuesForModel } from './anthropic-effort.mjs';
+import { effortValuesForModel, thinkingTypesFromCapabilities } from './anthropic-effort.mjs';
 import { makeModelCache } from './model-cache.mjs';
 import { resolveAnthropicMaxTokens } from './anthropic-max-tokens.mjs';
 import {
@@ -28,9 +28,8 @@ export function loadAnthropic() {
 
 // 4-BP cache policy aligned with anthropic-oauth — system + tier3 +
 // messages-tail. Tool schemas sit before system and are covered by the system
-// breakpoint, so they do not spend a separate cache_control slot. 1h TTL
-// requires the extended-cache-ttl beta header, which we set on the client via
-// defaultHeaders below.
+// breakpoint, so they do not spend a separate cache_control slot. The 1h TTL
+// is requested with cache_control ttl:"1h"; no beta header is needed.
 
 // BP3 (tier3) rides its own `system` role block (the 3rd system block, tagged
 // cacheTier:'tier3'). buildSystemBlocks applies the tier3 1h cache_control to
@@ -73,6 +72,7 @@ export function _normalizeAnthropicModel(raw, provider = 'anthropic') {
   const dated = /-\d{8}$/.test(String(id));
   const versioned = !dated && /^claude-[a-z]+-\d+(?:-\d+)?$/i.test(String(id));
   const effortValues = effortValuesForModel(raw?.capabilities, id);
+  const thinkingTypes = thinkingTypesFromCapabilities(raw?.capabilities);
   return {
     id,
     display: raw?.display_name || raw?.displayName || raw?.display || _prettyName(id, family),
@@ -90,6 +90,7 @@ export function _normalizeAnthropicModel(raw, provider = 'anthropic') {
     latest: false,
     supportsReasoning: effortValues.length > 0 || _capabilitySupported(raw?.capabilities?.thinking),
     reasoningOptions: effortValues.length ? [{ type: 'effort', values: effortValues }] : [],
+    ...(thinkingTypes ? { thinkingTypes } : {}),
   };
 }
 // The API-key provider has no catalog cache of its own — it reads the same
@@ -129,8 +130,8 @@ function _catalogOutputTokensFromSharedCache(model) {
   }
 }
 
-export function resolveMaxTokens(model) {
-  return resolveAnthropicMaxTokens(model, { catalogLookup: _catalogOutputTokensFromSharedCache });
+export function resolveMaxTokens(model, { modelMaxOutputTokens = null } = {}) {
+  return resolveAnthropicMaxTokens(model, { catalogLookup: _catalogOutputTokensFromSharedCache, modelMaxOutputTokens });
 }
 
 // Test-only escape hatch for the provider contract scripts
@@ -142,11 +143,12 @@ export const _test = {
   sanitizeInputSchema: (schema, toolName) => sanitizeAnthropicInputSchema(schema, toolName, 'anthropic'),
 };
 
-function deferredAnthropicTools(activeTools, messages, opts) {
-  return sharedDeferredAnthropicTools(activeTools, messages, opts, 'anthropic');
+function deferredAnthropicTools(activeTools, messages, opts, provider = 'anthropic') {
+  return sharedDeferredAnthropicTools(activeTools, messages, opts, provider);
 }
-export function requestAnthropicTools(tools, messages, opts) {
-  return sharedRequestAnthropicTools(tools, messages, opts, 'anthropic');
+// `provider`: the engine's name (a gateway Messages engine runs under its gateway's).
+export function requestAnthropicTools(tools, messages, opts, provider = 'anthropic') {
+  return sharedRequestAnthropicTools(tools, messages, opts, provider);
 }
 // Test-only: expose the lowering so the steering-provenance test can assert
 // the API-key provider keeps steering-tagged user turns distinct (mirrors

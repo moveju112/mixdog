@@ -27,8 +27,6 @@ import { agentActivitySessionIds } from './desktop-types.ts';
 import { defaultSessionLaneStore } from './session-lane-store.ts';
 import { desktopHeaderSnapshotsEqual } from './desktop-snapshot-store.ts';
 import { shellJobsStatusEqual } from '../shared/shell-jobs-status.ts';
-import { shouldOfferSessionInheritance } from './session-inheritance.ts';
-import { DESKTOP_TOAST_EVENT } from './desktop-toasts.tsx';
 import { AGENT_GROUP_EXPANSION_EVENT, AgentGroupsMenu } from './agent-group-visibility.tsx';
 import i18n from './i18n.ts';
 
@@ -43,6 +41,33 @@ function installDom() {
 test('missing liveness is unknown, and execution capacity waits are queued', () => {
   assert.equal(desktopAgentActivityState({ status: 'unknown', stage: 'unknown' }), 'unknown');
   assert.equal(desktopAgentActivityState({ status: 'running', stage: 'resource_wait' }), 'queued');
+});
+
+test('a working agent keeps its lifecycle while the runtime phase reads idle, done or error between steps', () => {
+  for (const stage of ['idle', 'done', 'error', 'connecting', 'streaming', 'tool_running']) {
+    assert.equal(desktopAgentActivityState({ status: 'running', stage }), 'running', stage);
+  }
+  // The status still ends the work: a settled agent is idle whatever stale phase it carries.
+  assert.equal(desktopAgentActivityState({ status: 'idle', stage: 'streaming' }), 'idle');
+  // A turn that ended in an error failed: never a rest, whatever stage it carries.
+  assert.equal(desktopAgentActivityState({ status: 'error', stage: 'running' }), 'failed');
+  // A cancel in either field is never work.
+  assert.equal(desktopAgentActivityState({ status: 'running', stage: 'cancelled' }), 'cancelled');
+  // A row with only a stage is judged by it.
+  assert.equal(desktopAgentActivityState({ stage: 'streaming' }), 'running');
+  assert.equal(desktopAgentActivityState({ stage: 'idle' }), 'idle');
+});
+
+test('a completed pool row reads done, a cancel or failure outranks it, and new work reads working', () => {
+  assert.equal(desktopAgentActivityState({ status: 'completed', stage: 'completed' }), 'done');
+  assert.equal(
+    desktopAgentActivityState({ status: 'completed', stage: 'completed' }, { waitingForTasks: true }),
+    'waiting'
+  );
+  assert.equal(desktopAgentActivityState({ status: 'cancelled', stage: 'completed' }), 'cancelled');
+  assert.equal(desktopAgentActivityState({ status: 'failed', stage: 'failed' }), 'failed');
+  assert.equal(desktopAgentActivityState({ status: 'running', stage: 'running' }), 'running');
+  assert.equal(desktopAgentActivityState({ status: 'idle', stage: 'idle' }), 'idle');
 });
 
 test('background shell jobs never change an agent state or count as waiting', () => {
@@ -171,7 +196,7 @@ test('shell status equality includes detail fields that arrive after the task id
   );
 });
 
-test('the context card offers inheritance only after the selected model changes', async () => {
+test('the context card offers only compaction, also after the model changed', async () => {
   const changed = {
     sessionId: 'lead-inherit',
     provider: 'cursor',
@@ -180,105 +205,27 @@ test('the context card offers inheritance only after the selected model changes'
     stats: { currentEstimatedContextTokens: 50 },
     displayContextWindow: 100,
   };
-  assert.equal(shouldOfferSessionInheritance(changed), true);
-  assert.equal(
-    shouldOfferSessionInheritance({
-      ...changed,
-      items: [{ kind: 'assistant', provider: 'cursor', model: 'gpt-5.6', text: 'done' }],
-    }),
-    false
-  );
   const dom = installDom();
-  const inherited = [];
-  const preflights = [];
-  let verdict = { known: true, fits: true, used: 90, limit: 100, percent: 90, reason: '' };
+  const requests = [];
   window.mixdogDesktop = {
     invokeCapability: async (request) => {
-      preflights.push(request);
-      return { value: verdict };
+      requests.push(request);
     },
   };
   try {
     await act(async () => {
-      dom.root.render(
-        React.createElement(ContextUsageIndicator, {
-          snapshot: changed,
-          onInherit: async (sourceSessionId, route) => {
-            inherited.push({ sourceSessionId, route });
-          },
-        })
-      );
+      dom.root.render(React.createElement(ContextUsageIndicator, { snapshot: changed, open: true }));
     });
-    assert.ok(document.querySelector('.context-inherit'));
-    await act(async () => {
-      document.querySelector('.context-inherit').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    });
-    // No dialog stands between the button and the handover: one click carries the source session on its own route.
-    assert.deepEqual(inherited, [
-      {
-        sourceSessionId: 'lead-inherit',
-        route: { provider: 'cursor', model: 'gpt-5.6' },
-      },
-    ]);
-    // The verdict belongs to the heir's route, so it is read from the runtime
-    // that would perform the carry — never from this card's own gauge, which
-    // measures the session's current provider against its current model.
-    assert.deepEqual(preflights, [
-      {
-        capability: 'inheritancePreflight',
-        args: ['lead-inherit', { provider: 'cursor', model: 'gpt-5.6' }],
-        sessionId: 'lead-inherit',
-      },
-    ]);
-
-    // A conversation the heir cannot hold is refused before any session is
-    // created, in the user's own words instead of an engine sentence.
-    verdict = { known: true, fits: false, used: 853_569, limit: 500_000, percent: 171, reason: '' };
-    const warnings = [];
-    window.addEventListener(DESKTOP_TOAST_EVENT, (event) => warnings.push(event.detail));
-    await act(async () => {
-      document.querySelector('.context-inherit').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    });
-    assert.equal(preflights.length, 2);
-    assert.equal(inherited.length, 1);
-    assert.equal(warnings.at(-1)?.tone, 'warn');
-
-    const compacted = [];
-    window.mixdogDesktop = {
-      invokeCapability: async (request) => {
-        compacted.push(request);
-      },
-    };
-    await act(async () => {
-      dom.root.render(
-        React.createElement(ContextUsageIndicator, {
-          snapshot: {
-            ...changed,
-            sessionId: 'same-claude',
-            provider: 'anthropic-oauth',
-            model: 'claude-fable-5-1',
-            items: [
-              {
-                kind: 'assistant',
-                provider: 'anthropic-oauth',
-                model: 'Claude Fable 5.1',
-                text: 'done',
-              },
-            ],
-          },
-          onInherit: async (...args) => {
-            inherited.push(args);
-          },
-        })
-      );
-    });
+    // Forking a session lives in the session row's menu, not here.
     assert.equal(document.querySelector('.context-inherit'), null);
-    assert.ok(document.querySelector('.context-compact'));
+    assert.deepEqual(
+      [...document.querySelectorAll('.context-action')].map((button) => button.className),
+      ['context-action context-compact']
+    );
     await act(async () => {
       document.querySelector('.context-compact').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     });
-    assert.deepEqual(compacted, [{ capability: 'compact', sessionId: 'same-claude' }]);
-    assert.equal(inherited.length, 1);
+    assert.deepEqual(requests, [{ capability: 'compact', sessionId: 'lead-inherit' }]);
   } finally {
     await act(async () => dom.root.unmount());
     dom.close();
@@ -1268,15 +1215,15 @@ test('Agents order by creation, then move on turn start and completion only', as
     model: 'gpt-5.6',
     provider: 'openai',
   });
-  // A working row has NO idle stamp and a live heartbeat in updatedAt — the
+  // A working row has NO idle stamp and an advancing updatedAt — the
   // exact shape that used to shove a session to the top on every tick.
-  const workingRow = (owner, createdAt, turnStartedAt, heartbeatAt) => ({
+  const workingRow = (owner, createdAt, turnStartedAt, updatedAt) => ({
     ...idleRow(owner, createdAt, createdAt),
     status: 'streaming',
     stage: 'streaming',
     idleSince: null,
     turnStartedAt: new Date(turnStartedAt).toISOString(),
-    updatedAt: new Date(heartbeatAt).toISOString(),
+    updatedAt: new Date(updatedAt).toISOString(),
   });
   let push = () => {};
   window.mixdogDesktop = {
@@ -1319,7 +1266,7 @@ test('Agents order by creation, then move on turn start and completion only', as
     await act(async () => push([idleRow('first', 2_000, 50_000), workingRow('second', 1_000, 9_000, 30_000)]));
     assert.deepEqual(owners(), ['first', 'second']);
 
-    // The heartbeat runs far past the leader's stamp and still moves nothing.
+    // updatedAt runs far past the leader's stamp and still moves nothing.
     await act(async () => push([idleRow('first', 2_000, 50_000), workingRow('second', 1_000, 9_000, 90_000)]));
     assert.deepEqual(owners(), ['first', 'second']);
 
@@ -1443,8 +1390,8 @@ test('the cancellation ledger holds a stopped row against a later running snapsh
     turnStartedAt,
   });
   assert.equal(ledger.apply([row('cancelled', 1_000)])[0].status, 'cancelled');
-  // The pool's heartbeat sidecar re-declares the session running once the
-  // durable index drops the cancelled row: a stale lease, not new work.
+  // The daemon still reports the session running once the durable index
+  // drops the cancelled row: a stale report, not new work.
   const resurrected = ledger.apply([{ ...row('running', 1_000), updatedAt: 9_000_000 }])[0];
   assert.equal(resurrected.status, 'cancelled');
   assert.equal(resurrected.stage, 'cancelled');
@@ -1454,7 +1401,7 @@ test('the cancellation ledger holds a stopped row against a later running snapsh
   assert.equal(ledger.size(), 0);
 });
 
-test('an unstamped cancellation survives a heartbeat that invents a start stamp', () => {
+test('an unstamped cancellation survives a running report that invents a start stamp', () => {
   const ledger = createDesktopCancellationLedger();
   // An agent cancelled WHILE QUEUED never ran, so it carries no frozen stamp:
   // its ledger baseline is 0 and any later stamp would outrank it.
@@ -1469,8 +1416,8 @@ test('an unstamped cancellation survives a heartbeat that invents a start stamp'
     ])[0].status,
     'cancelled'
   );
-  // The pool promotion publishes `running` with a SYNTHESIZED startedAt
-  // (session createdAt / heartbeat mtime) and never a turn start.
+  // A running report publishes `running` with a SYNTHESIZED startedAt
+  // (the session createdAt) and never a turn start.
   const promoted = ledger.apply([
     {
       tag: 'plan',
@@ -1485,7 +1432,7 @@ test('an unstamped cancellation survives a heartbeat that invents a start stamp'
   assert.equal(promoted.status, 'cancelled');
   assert.equal(promoted.stage, 'cancelled');
   assert.equal(desktopAgentActivityState(promoted), 'cancelled');
-  // ISO heartbeat stamps take the same path.
+  // ISO stamps take the same path.
   assert.equal(
     ledger.apply([
       {
@@ -1664,10 +1611,10 @@ test('the Agents pane paints a cancelled agent as cancelled, never completed or 
     assert.match(document.body.textContent, /Cancel unconfirmed/);
     assert.doesNotMatch(document.body.textContent, /Completed|Idle|Queued/);
 
-    // A later snapshot promoting the same sessions back to running (the pool's
-    // 2-minute heartbeat lease) must not resurrect either of them — including
-    // the queued cancellation, which has NO frozen stamp of its own while the
-    // promotion invents startedAt from the session record / heartbeat mtime.
+    // A later snapshot reporting the same sessions as running again (the
+    // daemon has not unwound their turns yet) must not resurrect either of
+    // them — including the queued cancellation, which has NO frozen stamp of
+    // its own while the report invents startedAt from the session record.
     await act(async () =>
       push([
         {
@@ -1697,7 +1644,7 @@ test('the Agents pane paints a cancelled agent as cancelled, never completed or 
     assert.equal(stateOf('worker-running'), 'cancelled');
 
     // Real new work under the same identity carries a newer turn stamp — the
-    // one signal the heartbeat promotion never publishes.
+    // one signal a stale running report never publishes.
     await act(async () =>
       push([
         {

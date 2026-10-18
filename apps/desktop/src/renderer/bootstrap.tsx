@@ -18,6 +18,7 @@ const ConnectionStatusBanner = lazy(() =>
 );
 import { RemoteClaimPrompt } from './RemoteClaimPrompt';
 import { DesktopErrorBoundary, installGlobalRendererDiagnostics } from './RendererRecovery';
+import './font-faces-styles';
 import './bootstrap-styles';
 import './webview-zoom';
 import { isNativeDesktopWindow } from './remote-ui-projection';
@@ -25,6 +26,7 @@ import { installShellViewport } from './shell-viewport';
 import { installFocusModality } from './focus-modality';
 import { installMobileSurfaceMarker } from './mobile-surface';
 import { installMotionVisibility } from './motion-visibility';
+import { installChatTextSize } from './chat-text-size-preference';
 import { installScrollbarMetrics } from './scrollbar-metrics';
 import { markBootStage } from './boot-metrics';
 import { scheduleFontWarmup } from './font-warmup';
@@ -53,6 +55,10 @@ const removeMobileSurfaceMarker = installMobileSurfaceMarker();
 window.addEventListener('beforeunload', removeMobileSurfaceMarker, { once: true });
 const removeMotionVisibility = installMotionVisibility();
 window.addEventListener('beforeunload', removeMotionVisibility, { once: true });
+// Per-device chat text size BEFORE the first paint, so the transcript never
+// reflows from the default scale to the stored one.
+const removeChatTextSize = installChatTextSize();
+window.addEventListener('beforeunload', removeChatTextSize, { once: true });
 
 // Listen before React mounts. Persisted pane session ids are not registered
 // here: usePaneWorkspace first authorizes them against the durable catalog.

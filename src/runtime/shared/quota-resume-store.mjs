@@ -131,6 +131,32 @@ export function listQuotaResumeEntries() {
   return [...load().entries.values()];
 }
 
+/** Rekey a proven legacy execution and its Goal together; invalidate old fires. */
+export function rekeyQuotaResumeTurn(sessionId, fromTurnKey, toTurnKey) {
+  const current = load();
+  const id = text(sessionId);
+  const from = text(fromTurnKey);
+  const to = text(toTurnKey);
+  if (!id || !from || !to || from === to) return false;
+  const entry = current.entries.get(id);
+  const suspension = current.suspensions.get(id);
+  const moveEntry = entry?.turnKey === from;
+  const moveGoal = suspension?.turnKey === from;
+  if (!moveEntry && !moveGoal) return false;
+  const next = {
+    ...current,
+    generation: current.generation + Number(moveEntry),
+    entries: new Map(current.entries),
+    suspensions: new Map(current.suspensions),
+  };
+  if (moveEntry) next.entries.set(id, normalizeEntry({ ...entry, turnKey: to, generation: next.generation }));
+  if (moveGoal) next.suspensions.set(id, normalizeSuspension({ ...suspension, turnKey: to }));
+  persist(next);
+  state = next;
+  notify(id);
+  return true;
+}
+
 /** The session snapshot's `quotaResume` value for an entry (or null). */
 export function publicQuotaResume(entry) {
   if (!entry) return null;
@@ -234,6 +260,22 @@ export function forgetQuotaSuspendedGoal(sessionId) {
   if (!current.suspensions.delete(text(sessionId))) return false;
   persist(current);
   return true;
+}
+
+/** Whether a session record belongs to a delegated agent child (declared
+ *  agent-only visibility, or a legacy non-Lead agent-owned child with a distinct
+ *  parent). Such a session never owns a quota resume: the Lead decides retries. */
+export function isAgentOnlySession(session) {
+  if (!session || typeof session !== 'object') return false;
+  const lower = (value) => text(value).toLowerCase();
+  if (lower(session.visibility) === 'agent-only') return true;
+  const parentId = text(session.parentSessionId || session.ownerSessionId);
+  return (
+    lower(session.owner) === 'agent' &&
+    lower(session.agent) !== 'lead' &&
+    parentId !== '' &&
+    parentId !== text(session.id)
+  );
 }
 
 /** Global setting, default on. */

@@ -44,6 +44,8 @@ export type TranscriptItem = RecordValue & {
   callErrorCount?: number;
   exitErrorCount?: number;
   images?: Array<{ id?: number | null; name?: string; mimeType?: string; bytes?: number; attachmentRef?: string }>;
+  /** User rows: the attachments the message carries, by the content hash the host stores them under. */
+  attachments?: Array<{ id: string; kind: 'image' | 'file' | 'text'; name: string; mimeType: string; size: number }>;
   /** Restored rows: each image's stored original, by the `[Image: …]` line that draws it. */
   imageRefs?: Array<{ line: string; ref?: string }>;
 };
@@ -51,6 +53,8 @@ export type TranscriptItem = RecordValue & {
 export type Approval = RecordValue & {
   id?: string;
   name?: string;
+  /** 'question' = an ask_user card (args.questions) instead of an allow/deny one. */
+  kind?: string;
   reason?: string;
   args?: unknown;
   cwd?: string;
@@ -169,6 +173,8 @@ export type Snapshot = RecordValue & {
       command?: string;
       cwd?: string;
       startedAt?: number | string | null;
+      /** Killed, but not every process is confirmed gone; the folder stays held. */
+      terminationUnconfirmed?: boolean;
     }>;
     /** Recently finished background jobs; never part of `count`. */
     finished?: Array<{
@@ -189,7 +195,8 @@ export type Snapshot = RecordValue & {
 export const EMPTY_SNAPSHOT: Snapshot = { items: [], queued: [] };
 export const EMPTY_TRANSCRIPT_ITEMS: TranscriptItem[] = [];
 
-/** Session owners whose Lead or child-agent heartbeat is active. Unlike the
+/** Session owners whose Lead or child-agent turn the daemon reports running in
+ * its in-memory state (`leadWorking` / `agentWorking`). Unlike the
  * sidebar selection helper below, this list is process-wide and must never be
  * changed by whichever conversation currently has focus. */
 export function agentActivitySessionIds(sessions: readonly DesktopSessionSummary[]): string[] {
@@ -207,6 +214,8 @@ export const REVIEW_DIFF_STYLE_KEY = 'mixdog.review-diff-style.v1';
 export const SCM_DIFF_STYLE_KEY = 'mixdog.scm-diff-style.v1';
 export const TURN_REVIEW_DIFF_STYLE_KEY = 'mixdog.turn-review-diff-style.v1';
 export const SESSION_DIFF_STYLE_KEY = 'mixdog.session-diff-style.v1';
+/** The composer chip's and Changes pane's one global source (uncommitted, branch, …). */
+export const SESSION_CHANGES_SOURCE_KEY = 'mixdog.session-changes-source.v1';
 
 export type DiffStyle = 'unified' | 'split';
 

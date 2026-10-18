@@ -1,6 +1,7 @@
 /* The side dock's visualize view: the agent's artifacts beside the chat. One
    tab body holds 1-3 panes side by side, each under a small caption. */
 .visualize-pane {
+  position: relative;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -36,7 +37,9 @@
 .visualize-tabs .dock-header-chip.is-active {
   flex: 0 0 auto;
   min-width: 96px;
-  max-width: 180px;
+  /* Never wider than the strip: a narrow panel ellipsizes the label and
+     keeps the chip's start and close button in view. */
+  max-width: min(180px, 100%);
 }
 .visualize-tabs .dock-header-chip .browser-tab-select {
   cursor: pointer;
@@ -60,24 +63,31 @@
   flex-direction: column;
   background: var(--mx-bg-base);
 }
-.visualize-pane-label {
-  flex: 0 0 auto;
-  padding: 2px 8px;
-  font-size: 11px;
-  line-height: 18px;
-  color: var(--mx-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-bottom: 1px solid var(--mx-border);
-}
 .visualize-pane-content {
   flex: 1;
   min-height: 0;
   display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  overflow: auto;
+}
+/* Holds a pane's content; the zoom bar scales it (transform + 1/scale size),
+   so it always fills the pane. It takes the pane's height by stretching, not
+   by `height: 100%`, so it is full height from the first frame. */
+.visualize-zoom-layer {
+  flex: none;
+  width: 100%;
+  height: 100%;
+  display: flex;
   align-items: center;
   justify-content: center;
-  overflow: auto;
+  transform-origin: 0 0;
+}
+/* A remote pane's loading / error note is the same element the page box later
+   reuses (React keeps the div), so it fills the layer from the first frame
+   instead of sitting centred at its own height and then growing. */
+.visualize-zoom-layer > .visualize-empty {
+  align-self: stretch;
 }
 .visualize-pane-content iframe {
   width: 100%;
@@ -89,11 +99,24 @@
      color-scheme Chromium backs a light-scheme frame with an opaque canvas. */
   background: transparent;
 }
+/* Chromium's PDF viewer zooms by itself on Ctrl+wheel / Ctrl +/-/0, stacking
+   a second zoom on the pill's. While Ctrl/Cmd is held the document frame lets
+   the wheel through to the panel, whose zoom is the only one (visualize-zoom.ts;
+   main swallows the keys, host-zoom-input.ts). */
+.visualize-pane[data-zoom-modifier] .visualize-document-frame {
+  pointer-events: none;
+}
 .visualize-pane-content img,
 .visualize-pane-content video {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+}
+/* A zoomed image (its layer grows by the scale) is drawn at the scale times
+   its fitted size: `zoom` multiplies its natural size, and the max-size caps
+   resolve against the grown layer, so a small image zooms too. */
+.visualize-zoom-layer img {
+  zoom: var(--visualize-zoom, 1);
 }
 .visualize-pane-content audio {
   width: calc(100% - 24px);
@@ -154,98 +177,6 @@
 .visualize-problem-count {
   color: var(--mx-text-muted);
 }
-/* Version history: a compact stepper row under the tab strip. A kept version
-   on screen is read-only and tinted so it never passes for the live file. */
-/* The row's own width decides the layout (container query), not the window. */
-.visualize-version {
-  flex: 0 0 auto;
-  min-width: 0;
-  container: visualize-version / inline-size;
-  font-size: 11px;
-  line-height: 18px;
-  border-bottom: 1px solid var(--mx-border);
-  background: var(--mx-bg-base);
-}
-.visualize-version.is-snapshot {
-  background: color-mix(in srgb, var(--mx-warning, #e0a030) 14%, var(--mx-bg-base));
-}
-/* The read-only state: a full-width strip with its whole text, never a
-   squeezed pill. */
-.visualize-snapshot-strip {
-  padding: 2px 8px;
-  color: var(--mx-text-strong, inherit);
-  background: color-mix(in srgb, var(--mx-warning, #e0a030) 26%, transparent);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.visualize-versionbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 4px;
-  min-width: 0;
-  padding: 2px 6px;
-}
-.visualize-version-secondary {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.visualize-version-action.is-primary {
-  border-color: var(--mx-border);
-}
-/* Narrow: stepper + Back to live on the first line, Compare/Restore on a
-   second line below. */
-@container visualize-version (max-width: 379px) {
-  .visualize-version-secondary {
-    order: 1;
-    flex: 1 0 100%;
-    justify-content: flex-end;
-  }
-}
-.visualize-version-step,
-.visualize-version-action {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-}
-.visualize-version-step {
-  padding: 0 2px;
-}
-.visualize-version-step:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.visualize-version-step:not(:disabled):hover,
-.visualize-version-action:hover {
-  background: color-mix(in srgb, currentColor 10%, transparent);
-}
-.visualize-version-action[aria-pressed="true"] {
-  border-color: var(--mx-border);
-  background: color-mix(in srgb, currentColor 12%, transparent);
-}
-.visualize-version-count {
-  flex: 0 0 auto;
-  font-variant-numeric: tabular-nums;
-}
-.visualize-versionbar-spacer {
-  flex: 1 1 0;
-}
-.visualize-version-error {
-  padding: 0 8px 2px;
-  color: var(--mx-danger, #d9534f);
-  overflow-wrap: anywhere;
-}
-.visualize-pane-label.is-snapshot {
-  background: color-mix(in srgb, var(--mx-warning, #e0a030) 14%, transparent);
-}
 /* Comparing a 2-3 pane tab: version | live pairs in two columns. */
 .visualize-body.is-compare-grid {
   display: grid;
@@ -257,7 +188,7 @@
   color: var(--mx-text-muted);
 }
 
-/* Outside network toggle in the toolbar: highlighted once something was blocked. */
+/* Toolbar button highlighted for attention (e.g. Versions while a kept version shows). */
 .visualize-pane .browser-pane-nav-button[data-attention="true"] {
   color: var(--mx-warning, #e0a030);
   background: color-mix(in srgb, var(--mx-warning, #e0a030) 16%, transparent);
@@ -281,6 +212,30 @@
 .visualize-script-pane iframe {
   flex: 1;
   min-height: 0;
+}
+/* A remote PDF / Office pane: its pages as images, scrolled top to bottom. */
+.visualize-document-pages {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  box-sizing: border-box;
+}
+.visualize-pane-content .visualize-document-pages img {
+  display: block;
+  width: calc(100% - 16px);
+  height: auto;
+  max-height: none;
+  background: #fff;
+}
+.visualize-document-more {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--mx-text-muted, inherit);
 }
 
 /* Inline (direct-renderer) panes: a failed render shows its error and source. */
@@ -370,40 +325,6 @@
 }
 .visualize-history-item.is-open .visualize-history-state {
   color: var(--mx-text-strong, inherit);
-}
-
-/* Export outcome: saved path (with Open) or the error. */
-.visualize-notice {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  font-size: 11px;
-  line-height: 18px;
-  border-bottom: 1px solid var(--mx-border);
-  background: var(--mx-bg-base);
-}
-.visualize-notice.is-error {
-  color: var(--mx-danger, #d9534f);
-}
-.visualize-notice-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.visualize-notice-dismiss {
-  flex: 0 0 auto;
-  display: inline-flex;
-  padding: 2px;
-  border: 0;
-  border-radius: 4px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-}
-.visualize-notice-dismiss:hover {
-  background: color-mix(in srgb, currentColor 10%, transparent);
 }
 
 /* Source view: read-only, line-numbered, highlighted. */

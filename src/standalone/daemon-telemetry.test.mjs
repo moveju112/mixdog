@@ -7,8 +7,10 @@ import {
   DAEMON_TELEMETRY_INTERVAL_MS,
   collectDaemonTelemetry,
   createDaemonTelemetry,
+  createStallDescriber,
   formatDaemonTelemetry,
 } from './daemon-telemetry.mjs';
+import { createSlowSpans, markPhase } from '../runtime/shared/slow-span.mjs';
 
 const TELEMETRY_URL = new URL('./daemon-telemetry.mjs', import.meta.url).href;
 const MB = 1024 * 1024;
@@ -307,4 +309,48 @@ test('a child using the production start/stop loop emits periodic samples then f
   assert.ok(report.periodic >= 1);
   assert.equal(report.after.lines, report.frozen.lines);
   assert.equal(report.after.intervalTicks, report.frozen.intervalTicks);
+});
+
+test('post-major-GC heap: min per interval is reported on the line and reset on take', async () => {
+  const { createPostGcHeapTracker, createDaemonTelemetry } = await import('./daemon-telemetry.mjs');
+  let onGc;
+  let used = 0;
+  const tracker = createPostGcHeapTracker({ heapUsed: () => used, observe: (cb) => ((onGc = cb), () => {}) });
+  used = 300;
+  onGc({ detail: { kind: 4 } });
+  used = 200;
+  onGc({ detail: { kind: 4 } });
+  used = 50;
+  onGc({ detail: { kind: 1 } }); // minor GC ignored
+  assert.equal(tracker.take(), 200);
+  assert.equal(tracker.take(), -1);
+  used = 120;
+  onGc({ detail: { kind: 4 } });
+  const lines = [];
+  const t = createDaemonTelemetry({ log: (l) => lines.push(l), createGcTracker: () => tracker });
+  t.start(1_000_000);
+  t.emit();
+  t.stop();
+  assert.match(lines[0], /postGcHeapMinBytes=120/);
+});
+
+test('createStallDescriber names the overlapping spans and the in-flight work snapshot', async () => {
+  let t = 0;
+  const spans = createSlowSpans({ now: () => t });
+  await spans.trace('session.read#abcd1234:getTurnChanges', async () => {
+    t += 480;
+    markPhase('action');
+  });
+  const describe = createStallDescriber({
+    spans,
+    getWork: () => ({ activeCalls: 2, queuedCalls: 1, busySessions: 1, busyMemoryAgents: 0 }),
+  });
+  assert.equal(
+    describe(100, 500),
+    'spans: session.read#abcd1234:getTurnChanges 480ms action=480 | in-flight: activeCalls=2 queuedCalls=1 busySessions=1 busyMemoryAgents=0'
+  );
+  assert.equal(
+    describe(900, 950),
+    'in-flight: activeCalls=2 queuedCalls=1 busySessions=1 busyMemoryAgents=0'
+  );
 });

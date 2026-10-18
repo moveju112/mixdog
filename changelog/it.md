@@ -4,6 +4,139 @@ Modifiche rilevanti, dalla più recente. La pipeline di Deploy rifiuta di rilasc
 
 ## Unreleased
 
+## v1.2.4 - 2026-10-17
+
+Aggiornamento che include il controllo delle sessioni degli agenti e l'assegnazione di modelli di fallback, la preparazione automatica dei worktree, l'ottimizzazione dell'output dell'harness e miglioramenti generali delle prestazioni.
+
+### 1. Miglioramenti dell'harness: riduzione dell'output, stili più puliti e stabilizzazione generale
+
+- I resoconti di completamento dell'agente e le schede delle domande sono stati semplificati, riducendo l'output degli strumenti Git, ricerca e GitHub per risparmiare token.
+- È stata stabilizzata la pulizia dei processi di shell in background e degli strumenti esterni, migliorando i criteri di rilevamento degli agenti che non rispondono durante attività prolungate.
+
+### 2. Miglioramenti agli strumenti di generazione multimediale
+
+- È stata aumentata la stabilità della generazione di immagini ChatGPT, aggiunto il supporto per gli sfondi trasparenti e consentito di bloccare i modelli preferiti in base al tipo di supporto.
+
+### 3. Assegnazione di modelli di fallback per gli agenti
+
+- Aggiunto il supporto per i modelli di fallback che subentrano in ordine se il modello principale fallisce, consentendo di specificare direttamente un modello all'avvio dei sotto-agenti (#86).
+
+### 4. Miglioramenti dei worktree
+
+- Aggiunta l'installazione automatica dei pacchetti e la configurazione dell'ambiente alla creazione di un nuovo worktree, migliorando la reattività del menu dei branch.
+
+### 5. Stabilizzazione delle chiamate agli strumenti per provider
+
+- Risolti gli errori nell'elaborazione del pensiero di Claude su Antigravity, aggiunto il monitoraggio dell'utilizzo e rafforzata l'affidabilità di ragionamento e chiamate agli strumenti sui gateway personalizzati (#79, #94, thanks @22nsuk and @sukjong2002).
+- Stabilizzate la connessione e i tentativi di Antigravity, migliorando l'esecuzione degli strumenti negli ambienti compatibili con Cursor e OpenAI.
+- Aggiunta la possibilità di verificare lo stato dei provider registrati sul PC direttamente dalle finestre SSH remote (#77, thanks @22nsuk).
+- Migliorata la compressione delle richieste Anthropic e ChatGPT con fallback sicuro per anticipare l'inizio della risposta.
+
+### 6. Rinnovo della gestione delle sessioni degli agenti
+
+- Modificato in modo che gli agenti completati rimangano nel pannello per 1 ora, ripristinando il riepilogo del conteggio delle attività per stato e gli avvisi di attesa.
+
+### 7. Gestione delle sessioni da parte dell'agente principale
+
+- Aggiunta la possibilità per l'agente principale di visualizzare l'elenco e i contenuti delle altre sessioni e gestirle direttamente inviando messaggi, annullando o eliminando le sessioni.
+
+### 8. Ottimizzazioni delle prestazioni remote e desktop
+
+- Le riconnessioni remote recuperano rapidamente solo i contenuti persi, migliorando la fluidità dello streaming e la velocità di cambio sessione su dispositivi mobili.
+- Consentita la riapertura immediata delle 2 sessioni più recenti su dispositivi mobili e risolto il blocco nella schermata di avvio.
+- Ottimizzati pannelli desktop, barra laterale, cambio sessione ed editor e schermate delle impostazioni per un'apertura più rapida e transizioni più fluide.
+
+### 9. Miglioramenti al download dell'app remota
+
+- Aggiunto il download in formato ZIP di cartelle escludendo i file non necessari nella web app remota ed estesa la gamma di file scaricabili tramite collegamenti nella conversazione.
+- Migliorato il salvataggio dei file su dispositivi mobili e l'attivazione delle notifiche (il salvataggio dei file su Android/iOS si applica dopo l'aggiornamento dell'app).
+
+### 10. Altre correzioni di bug e miglioramenti minori
+
+- Rimossi i limiti di chiamata e di frequenza sulle connessioni ai modelli remoti SSH (#101).
+- Ripresa automatica dei Goal in pausa dopo il ripristino dell'utilizzo e risolti diversi bug nel pannello delle modifiche e nella visualizzazione dello stato dei comandi.
+- Risolto il blocco del browser interno durante l'accesso a Google e i controlli bot (#102).
+
+## v1.2.3 - 2026-10-16
+
+Dal lancio, Mixdog è stato utilizzato da molti più utenti di quanto ci aspettassimo, e ve ne siamo davvero grati. Alcune parti sono ancora instabili e le stiamo correggendo il più rapidamente possibile. Le vostre segnalazioni e pull request hanno plasmato gran parte di questo rilascio. In caso di problemi, fatecelo sapere da **Impostazioni → Informazioni → Feedback**.
+
+Nuovo al ragionamento automatico? Un piccolo modello di valutazione sul vostro PC stabilisce l'intensità di riflessione del modello per ogni messaggio e passaggio. Per scoprire come funziona e come si è comportato su Terminal-Bench 2.1, consultate [Impegno di ragionamento automatico](https://github.com/tribgames/mixdog/blob/main/docs/auto-reasoning-effort.md).
+
+Aggiunti lo spostamento di una chat in un worktree dall'isola del compositore, uno streaming di testo più fluido e un servizio in background più rapido e affidabile.
+
+### Nuove funzionalità
+
+- **Worktree dall'isola** — Aggiunto un segmento di ramo all'isola del compositore che sposta una chat in un worktree, portando con sé o lasciando le modifiche non confermate.
+- **Schede delle domande** — Aggiunta una scheda per le domande poste da un agent, nell'app desktop e nella TUI.
+- **`/btw`** — Aggiunto `/btw` per porre una domanda rapida senza interrompere l'attività corrente.
+- **Strumento di sessione** — Aggiunto uno strumento che consente all'agent di rinominare, compattare, creare fork e spostare la sessione corrente (#14, thanks @hyeon1035298).
+- **Più PC su Android** — Aggiunta la possibilità di passare da un massimo di 16 PC salvati nell'app Android (#83, thanks @yupguni).
+- **Ripristino modifiche interrotte** — Aggiunto un pannello di ripristino che mostra le modifiche ai file interrotte da un arresto anomalo e le ripristina o le elimina in modo sicuro (#60, thanks @22nsuk).
+
+### Modifiche
+
+- Modificate le risposte in streaming in modo che appaiano in modo fluido man mano che vengono scritte anziché a scatti riga per riga.
+- Modificate l'uscita, le nuove chat e il pannello Modifiche per rispondere molto più rapidamente.
+- Modificati gli schemi degli strumenti MCP per essere convertiti per ciascun provider, in modo che gli strumenti funzionanti in altre app funzionino anche in Mixdog; uno strumento non funzionante viene saltato con una notifica.
+- Modificati i totali di utilizzo affinché rimangano nascosti quando un provider non ha segnalato l'utilizzo per ogni chiamata (#90, #91, thanks @22nsuk).
+- Modificato lo spostamento delle modifiche in un worktree per rifiutare i file ignorati da Git in status, in modo che nessuna modifica vada persa.
+- Modificati i backup delle impostazioni affinché rimangano associati a ciascun profilo, in modo che le impostazioni di un profilo non vengano mai sovrascritte da un altro.
+- Sostituita la striscia di versioni di Visualize con un menu Versioni e aggiunti la ridenominazione delle schede con doppio clic e l'evidenziazione dei comandi slash.
+- Sostituite le icone dei provider con i loghi ufficiali.
+- Modificato il ragionamento automatico per l'esecuzione anche sui percorsi di accesso a ChatGPT.
+
+### Correzioni di bug
+
+- Corretto l'errore HTTP 400 dei modelli Claude su Antigravity dovuto agli schemi degli strumenti (#80, thanks @ProofPage).
+- Corretto il pulsante Nuovo ramo nella chat che non eseguiva alcuna operazione (#85, thanks @oh1701).
+- Corretti gli agent appena avviati che non vedevano gli strumenti MCP al loro primo turno (#88, thanks @oh1701).
+- Corretto il blocco del servizio in background durante l'eliminazione delle sessioni e la ricomparsa delle sessioni eliminate o delle relative schede.
+- Corretto il problema per cui a volte il database rimaneva aperto dopo l'uscita dall'app.
+- Corretto il primo messaggio dopo aver cambiato il modello di una chat che non riusciva con "Session state changed unexpectedly".
+- Corretto il pulsante Indietro di Android che non chiudeva il pannello laterale destro.
+- Corretto il nome del ramo dell'isola che appariva in ritardo spostando il layout e le righe della shell che sfarfallavano al completamento del comando.
+- Corretto il pannello laterale che rimaneva aperto dopo la chiusura dell'ultima scheda e il pannello Visualize che rimaneva compresso all'apertura di un elemento visivo.
+- Corretti gli interruttori dei provider per sviluppatori che risultavano disattivati dopo l'attivazione e gli errori dei provider personalizzati che mostravano messaggi interni.
+- Corretto il salto della trascrizione quando il compositore modificava la propria altezza.
+
+### Altro
+
+- Corretto un errore di compilazione desktop (#89, thanks @22nsuk).
+
+## v1.2.2 - 2026-10-14
+
+Aggiunti l'accesso OAuth esplicito per MCP, il cambio modello sul posto e un banner di quota a riga singola.
+
+### Nuove funzionalità
+
+- **Accesso MCP** — Aggiunto l'accesso OAuth esplicito per i server MCP con stato, finestra di dialogo condivisa, incolla remoto e comandi TUI (#74, thanks @oh1701).
+- **Cambio modello sul posto** — Aggiunta la possibilità di cambiare il modello di una chat senza avviare una nuova sessione e Fork nel menu di sessione (#73, #52, thanks @grapefruit0205).
+- **Banner di quota** — Aggiunto un banner a riga singola sopra il compositore al raggiungimento di un limite; Riprendi riserva la prossima esecuzione all'orario di ripristino.
+- **Menu file** — Aggiunto un conteggio file sull'isola che tiene traccia delle modifiche di sessione non salvate, con Mostra modifiche ed Elimina cronologia.
+- **Dimensione testo della chat** — Aggiunta un'impostazione per dispositivo per la dimensione del testo della chat.
+
+### Modifiche
+
+- Modificati i tentativi dei provider affinché rispettino limiti e tempi di attesa specifici di ciascun provider, mostrando il tempo rimanente e l'opzione di annullamento.
+- Modificati i messaggi di errore per indicare la causa e il passaggio successivo, nascondendo Riprova quando riprovare non è utile.
+- Modificati i comandi della shell per rimanere in primo piano per 10 secondi per impostazione predefinita, fino a 30 secondi, prima di passare in background.
+- Regolati l'app desktop, il ragionamento automatico e il servizio in background per ridurre polling, rendering e memoria nelle sessioni lunghe.
+
+### Correzioni di bug
+
+- Corretto il blocco di uno o due secondi del servizio in background ogni 30 minutes.
+- Corretta la perdita delle notifiche di completamento degli agent quando veniva annullato un turno che aveva già prodotto output.
+- Corretta l'isola del compositore che mostrava gli agent in esecuzione come inattivi o completati.
+- Corretto il blocco del passaggio tra sessioni durante l'attesa della scansione delle modifiche di altre sessioni.
+- Corretta l'uscita delle finestre di dialogo della pagina del browser dal riquadro, il mancato completamento della conferma di uscita e il malfunzionamento delle scorciatoie di copia del browser.
+- Corretto il fallimento del caching dei prompt sui provider Responses personalizzati e la mancata corrispondenza dei progetti di sessione ereditati nella barra laterale (#70, #75, thanks @sukjong2002).
+- Corretto lo sfarfallio delle tabelle in streaming, il rimbalzo della trascrizione durante l'attività di un turno e la persistenza della scheda quota dopo il cambio di provider.
+
+### Altro
+
+- Rimossi gli helper non utilizzati (#67, thanks @22nsuk).
+
 ## v1.2.1 - 2026-10-14
 
 Aggiunta l'importazione di conversazioni da Codex e Claude Code, il provider Command Code e le menzioni di skill con `$`, e corretta l'osservazione dell'input di Computer Use, gli script di skill, il ragionamento automatico e diversi problemi di sessione.

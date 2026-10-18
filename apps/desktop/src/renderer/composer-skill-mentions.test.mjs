@@ -23,11 +23,15 @@ const { createRoot } = await import('react-dom/client');
 const { skillMentionMatchAt } = await import('./use-composer-palettes.ts');
 const {
   appliedSkillsOf,
+  composerHighlightSegments,
   composerSkillCatalog,
   disabledMentionedSkills,
   filterSkillMentions,
   invalidateSkillCatalogForMutation,
+  refreshSkillCatalog,
+  resetSkillCatalogReadsForTests,
   skillMentionSegments,
+  useSkillCatalog,
 } = await import('./composer-skill-mentions.tsx');
 const { Composer } = await import('./Composer.tsx');
 
@@ -84,7 +88,9 @@ test('reserved mention names are never palette rows or highlighted, but stay + c
   assert.deepEqual(filterSkillMentions(catalog.selectable, 'ho'), []);
   const isSkill = (name) => catalog.enabled.has(name);
   assert.deepEqual(
-    skillMentionSegments('$home $path $300 $release-notes', isSkill).filter((s) => s.skill).map((s) => s.skill),
+    skillMentionSegments('$home $path $300 $release-notes', isSkill)
+      .filter((s) => s.skill)
+      .map((s) => s.skill),
     ['release-notes']
   );
 });
@@ -171,6 +177,42 @@ test('highlight segments keep the text verbatim and mark only recognised names',
   assert.deepEqual(
     skillMentionSegments('', () => true),
     [{ text: '' }]
+  );
+});
+
+test('slash highlight: only a whole recognised leading /command is marked, text verbatim', () => {
+  const none = () => false;
+  const slash = (text) =>
+    composerHighlightSegments(text, none)
+      .filter((segment) => segment.slash)
+      .map((segment) => segment.text);
+  assert.deepEqual(slash('/btw hello'), ['/btw']);
+  assert.deepEqual(slash('/btw'), ['/btw']);
+  assert.deepEqual(slash('/btw\nsecond line'), ['/btw']);
+  assert.deepEqual(slash('  /new'), ['/new']);
+  assert.deepEqual(slash('/q'), ['/q']);
+  assert.deepEqual(slash('/bt'), []);
+  assert.deepEqual(slash('/foo x'), []);
+  assert.deepEqual(slash('/btwx hi'), []);
+  assert.deepEqual(slash('/'), []);
+  assert.deepEqual(slash('hello /btw'), []);
+  assert.deepEqual(slash('hello\n/btw'), []);
+  assert.deepEqual(slash('/btw 한글 입력'), ['/btw']);
+  for (const text of ['/btw hello', '  /new x', '/foo', '/btw $pptx', 'plain', '']) {
+    assert.equal(
+      composerHighlightSegments(text, none)
+        .map((segment) => segment.text)
+        .join(''),
+      text
+    );
+  }
+  assert.deepEqual(
+    composerHighlightSegments('/btw $pptx', (name) => name === 'pptx').map((s) => [s.text, !!s.slash, s.skill]),
+    [
+      ['/btw', true, undefined],
+      [' ', false, undefined],
+      ['$pptx', false, 'pptx'],
+    ]
   );
 });
 
@@ -328,6 +370,22 @@ test('composer: $ palette opens, filters, inserts; tokens highlight; off skills 
     await act(async () => input.dispatchEvent(new window.CompositionEvent('compositionend', { bubbles: true })));
     assert.ok(input.classList.contains('has-skill-mentions'));
 
+    // A recognised leading /command takes the accent ink; the mirror text is identical.
+    const slashTokens = () =>
+      Array.from(document.querySelectorAll('.composer-skill-highlight .composer-slash-token'), (n) => n.textContent);
+    await type('/btw hello');
+    assert.deepEqual(slashTokens(), ['/btw']);
+    assert.equal(document.querySelector('.composer-skill-highlight').textContent.replace('\u200b', ''), input.value);
+    await type('/bt');
+    assert.equal(document.querySelector('.composer-skill-highlight'), null);
+    await type('/foo x');
+    assert.equal(document.querySelector('.composer-skill-highlight'), null);
+    await type('/btw 안녕');
+    await act(async () => input.dispatchEvent(new window.CompositionEvent('compositionstart', { bubbles: true })));
+    assert.equal(document.querySelector('.composer-skill-highlight'), null);
+    await act(async () => input.dispatchEvent(new window.CompositionEvent('compositionend', { bubbles: true })));
+    assert.deepEqual(slashTokens(), ['/btw']);
+
     // No custom skill on: one status line with an inline link to Settings › Skills.
     currentStatus = { skills: STATUS.skills.filter((skill) => skill.source === 'builtin') };
     const empty = { ...props, sessionId: 'skill-mention-empty', identityScope: 'skill-mention-empty' };
@@ -427,5 +485,55 @@ test('composer: $ palette opens, filters, inserts; tokens highlight; off skills 
     assert.deepEqual(reads[local], [{ capability: 'skillsStatus' }]);
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+test('skill catalog reads are single-flight with a minimum age; focus never re-reads, signals force', async () => {
+  resetSkillCatalogReadsForTests();
+  let count = 0;
+  let release;
+  window.mixdogDesktop = {
+    invokeCapability: async () => {
+      count += 1;
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+      return { value: STATUS };
+    },
+  };
+  const first = refreshSkillCatalog('single-flight');
+  const second = refreshSkillCatalog('single-flight');
+  assert.equal(first, second, 'concurrent reads share one promise');
+  assert.equal(count, 1);
+  release();
+  await first;
+  // Within the minimum age the cached catalog is served without a read.
+  assert.equal(await refreshSkillCatalog('single-flight'), await first);
+  assert.equal(count, 1);
+  // A change signal (force) always starts a fresh read.
+  const forced = refreshSkillCatalog('single-flight', null, { force: true });
+  assert.equal(count, 2);
+  release();
+  await forced;
+
+  // A mounted catalog no longer re-reads when the window regains focus.
+  const host = document.createElement('div');
+  document.body.append(host);
+  const root = createRoot(host);
+  function Probe() {
+    useSkillCatalog('focus-probe', '');
+    return null;
+  }
+  try {
+    await act(async () => root.render(React.createElement(Probe)));
+    const mountedReads = count;
+    release();
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    await act(async () => window.dispatchEvent(new window.Event('focus')));
+    await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    assert.equal(count, mountedReads, 'window focus does not read skills');
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
   }
 });

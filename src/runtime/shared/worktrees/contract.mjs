@@ -19,7 +19,6 @@ export const DEFAULT_WORKTREE_BRANCH_PREFIX = 'mixdog/';
 
 export const WORKSPACE_TRANSITION_STATES = Object.freeze(['idle', 'provisioning', 'switching', 'removing', 'recovery']);
 const WORKTREE_ENTRY_STATES = Object.freeze(['creating', 'ready', 'deleting', 'recovery']);
-const BRANCH_OCCUPANCY_KINDS = Object.freeze(['current', 'session', 'external', 'free']);
 
 /**
  * Stable error codes. Clients branch on `error.code`, never on message text.
@@ -31,6 +30,8 @@ export const WORKTREE_ERROR_CODES = Object.freeze({
   WORKTREE_DISK_INSUFFICIENT: 'WORKTREE_DISK_INSUFFICIENT',
   WORKTREE_LARGE_REPO_CONFIRM: 'WORKTREE_LARGE_REPO_CONFIRM',
   WORKTREE_DIRTY: 'WORKTREE_DIRTY',
+  WORKTREE_DIRTY_CHOICE: 'WORKTREE_DIRTY_CHOICE',
+  WORKTREE_FILE_RECOVERY: 'WORKTREE_FILE_RECOVERY',
   WORKTREE_UNMERGED: 'WORKTREE_UNMERGED',
   WORKTREE_MISSING: 'WORKTREE_MISSING',
   WORKTREE_UNSUPPORTED_REPO: 'WORKTREE_UNSUPPORTED_REPO',
@@ -56,6 +57,10 @@ const DEFAULT_ERROR_MESSAGES = Object.freeze({
   WORKTREE_DISK_INSUFFICIENT: 'Not enough free disk space to create the worktree.',
   WORKTREE_LARGE_REPO_CONFIRM: 'The repository is large; confirm before creating a worktree.',
   WORKTREE_DIRTY: 'The worktree has uncommitted changes.',
+  WORKTREE_DIRTY_CHOICE:
+    'The project folder has uncommitted changes; choose whether to leave them there or carry them into the worktree.',
+  WORKTREE_FILE_RECOVERY:
+    'Retained file recovery records block worktree removal, including force. Inspect and explicitly delete them first.',
   WORKTREE_UNMERGED: 'The worktree branch has commits that are not merged.',
   WORKTREE_MISSING: 'The managed worktree no longer exists.',
   WORKTREE_UNSUPPORTED_REPO: 'This repository does not support managed worktrees.',
@@ -99,6 +104,31 @@ export class WorktreeError extends Error {
 export function worktreeError(code, message, details) {
   if (!Object.hasOwn(WORKTREE_ERROR_CODES, code)) throw new TypeError(`Unknown worktree error code "${code}".`);
   return new WorktreeError(code, message, details);
+}
+
+/**
+ * Why a workspace management action (merge, folder cleanup, branch deletion,
+ * checkout) was refused because something still uses an affected folder. Every
+ * surface shows the same meaning: the runtime throws exactly this text (TUI,
+ * remote) and the desktop translates the same English source string.
+ * @readonly
+ */
+export const WORKTREE_REFUSAL_REASONS = Object.freeze({
+  'workspace-retained': 'Sessions still retain this folder. Close or remove those sessions before cleaning it up.',
+  'workspace-lease': 'A runtime still holds this folder. Stop its work and release the workspace first.',
+  'folder-in-use': 'Sessions or workers still use an affected folder. Finish or move them before continuing.',
+  'folder-shell-jobs': 'Background commands still use an affected folder. Wait for them or stop them first.',
+  'workspace-admission-unreadable': 'Workspace activity cannot be verified. Nothing was changed.',
+});
+
+/**
+ * WORKTREE_BUSY_JOBS with the shared text of `reason` (WORKTREE_REFUSAL_REASONS).
+ * @param {keyof typeof WORKTREE_REFUSAL_REASONS} reason
+ * @param {Record<string, unknown>} [details]
+ */
+export function worktreeRefusal(reason, details = {}) {
+  if (!Object.hasOwn(WORKTREE_REFUSAL_REASONS, reason)) throw new TypeError(`Unknown refusal reason "${reason}".`);
+  return worktreeError('WORKTREE_BUSY_JOBS', WORKTREE_REFUSAL_REASONS[reason], { ...details, reason });
 }
 
 /**
@@ -301,29 +331,6 @@ export function normalizeWorktreeOwner(input) {
  * @typedef {'current'|'session'|'external'|'free'} BranchOccupancyKind
  * @typedef {{ branch: string, kind: BranchOccupancyKind, sessionId?: string, path?: string }} BranchOccupancy
  */
-
-/**
- * @param {unknown} input
- * @returns {BranchOccupancy}
- */
-export function normalizeBranchOccupancy(input) {
-  const value = record(input, 'occupancy');
-  const branch = text(value.branch, 'occupancy.branch');
-  const kind = oneOf(value.kind, BRANCH_OCCUPANCY_KINDS, 'occupancy.kind');
-  if (kind === 'free') {
-    if (value.sessionId != null || value.path != null) {
-      throw new TypeError('A free branch carries no sessionId or path.');
-    }
-    return { branch, kind };
-  }
-  if (kind !== 'session' && value.sessionId != null) {
-    throw new TypeError('Only a session occupancy carries a sessionId.');
-  }
-  const occupancy = { branch, kind };
-  if (kind === 'session') occupancy.sessionId = text(value.sessionId, 'occupancy.sessionId');
-  if (value.path != null) occupancy.path = text(value.path, 'occupancy.path');
-  return occupancy;
-}
 
 /**
  * The branch menu's rows (the desktop DesktopGitBranch shape) for the local
@@ -530,6 +537,35 @@ export function runRootReleasers(root, ctx) {
  *   `create: true` first creates `branch` from the project folder's current branch;
  *   `worktree`: run in this Lead's retained worktree, creating it (optionally named) on first use;
  *   `remove-worktree`: delete the retained worktree after dirty/unmerged checks.
+ */
+
+/**
+ * What happens to the project folder's uncommitted changes (tracked and
+ * untracked, ignored files excluded) when a session moves into a new
+ * worktree: `leave` keeps them in the project folder (the worktree starts at
+ * its HEAD); `carry` moves them into the worktree.
+ * @typedef {'leave'|'carry'} WorktreeCarryChoice
+ */
+export const WORKTREE_CARRY_CHOICES = Object.freeze(['leave', 'carry']);
+
+/**
+ * requestWorktree input.
+ * @typedef {object} RequestWorktreeInput
+ * @property {string|null} [name]
+ * @property {number} [expectedRevision]
+ * @property {boolean} [confirmLarge] Acknowledges WORKTREE_LARGE_REPO_CONFIRM.
+ * @property {boolean} [provision] Create and enter the worktree now (the session moves) instead of at the next send.
+ * @property {WorktreeCarryChoice} [carryChanges] Answers WORKTREE_DIRTY_CHOICE (`details: { count, paths }`,
+ *   `paths` capped to a preview), which a provisioning request without it raises while the project checkout has
+ *   uncommitted changes. Scope is the whole repository checkout; ignored files (dependencies, build output, env
+ *   files) are never carried and stay in the project folder.
+ */
+
+/**
+ * mergeWorkspace's `cleanup` after a successful merge: `removed: false` keeps
+ * the worktree and reports why (`code` of the refusal, e.g. WORKTREE_DIRTY,
+ * WORKTREE_UNMERGED, WORKTREE_REMOVAL_INCOMPLETE); the merge stands.
+ * @typedef {{ removed: boolean, code?: string, message?: string }} MergeCleanupResult
  */
 
 /**

@@ -5,6 +5,139 @@ la sección Unreleased esté vacía, y la marca con la versión publicada.
 
 ## Unreleased
 
+## v1.2.4 - 2026-10-17
+
+Actualización que incluye control de sesiones de agentes y asignación de modelos de respaldo, preparación automática de worktrees, optimización de la salida del harness y mejoras generales de rendimiento.
+
+### 1. Mejoras en el harness: reducción de salida, estilos más limpios y estabilización general
+
+- Se simplificaron los informes de finalización del agente y las tarjetas de preguntas, y se redujo la salida de las herramientas Git, búsqueda y GitHub para ahorrar tokens.
+- Se estabilizó la limpieza de procesos de shell en segundo plano y herramientas externas, y se mejoraron los criterios de detección de agentes que no responden en tareas prolongadas.
+
+### 2. Mejoras en la generación de medios
+
+- Se aumentó la estabilidad de la generación de imágenes de ChatGPT, se añadió soporte para fondos transparentes y se permite fijar modelos preferidos según el tipo de medio.
+
+### 3. Asignación de modelos de respaldo para agentes
+
+- Se añadió compatibilidad con modelos de respaldo que se activan en orden si falla el modelo principal, y se permite especificar un modelo directamente al iniciar subagentes (#86).
+
+### 4. Mejoras en worktrees
+
+- Se añadió la instalación automática de paquetes y configuración del entorno al crear un nuevo worktree, y se mejoró la capacidad de respuesta del menú de ramas.
+
+### 5. Estabilización de llamadas a herramientas por proveedor
+
+- Se corrigieron los errores en el procesamiento del razonamiento de Claude en Antigravity, se añadió el seguimiento de uso y se reforzó la fiabilidad del razonamiento y las llamadas a herramientas en puertas de enlace personalizadas (#79, #94, thanks @22nsuk and @sukjong2002).
+- Se estabilizaron la conexión y los reintentos de Antigravity, y se mejoró la ejecución de herramientas en entornos compatibles con Cursor y OpenAI.
+- Se añadió la posibilidad de consultar el estado de los proveedores registrados en el PC directamente desde ventanas SSH remotas (#77, thanks @22nsuk).
+- Se mejoró la compresión de solicitudes de Anthropic y ChatGPT con respaldo seguro para acelerar el inicio de las respuestas.
+
+### 6. Renovación de la gestión de sesiones de agentes
+
+- Se modificó para que los agentes completados permanezcan en el panel durante 1 hora y se restauraron el resumen de recuento de tareas por estado y los avisos de espera.
+
+### 7. Gestión de sesiones por parte del agente principal
+
+- Se añadió la capacidad de que el agente principal revise la lista y el contenido de otras sesiones y las gestione directamente enviando mensajes, cancelándolas o eliminándolas.
+
+### 8. Optimizaciones de rendimiento remoto y de escritorio
+
+- Las reconexiones remotas ahora recuperan rápidamente solo el contenido pendiente, y se mejoraron la fluidez de las respuestas y la velocidad de cambio de sesión en móviles.
+- Se permite reabrir directamente las 2 sesiones más recientes en móviles y se solucionó el bloqueo en la pantalla de inicio.
+- Se optimizaron los paneles de escritorio, la barra lateral, el cambio de sesión y las pantallas del editor y la configuración para abrirse más rápido y con mayor fluidez.
+
+### 9. Mejoras en la descarga de la aplicación remota
+
+- Se añadió la descarga en ZIP de carpetas excluyendo archivos innecesarios en la aplicación web remota y se amplió el rango de archivos descargables mediante enlaces de conversación.
+- Se mejoraron el guardado de archivos móviles y la activación de notificaciones (el guardado de archivos en Android/iOS se aplica tras actualizar la aplicación).
+
+### 10. Otras correcciones de errores y mejoras menores
+
+- Se eliminaron los límites de llamadas y velocidad en las conexiones remotas a modelos por SSH (#101).
+- Se reanudan automáticamente los Goals en pausa tras restablecerse el uso y se corrigieron varios errores en el panel de cambios y en la indicación del estado de comandos.
+- Se corrigió el bloqueo del navegador interno en el inicio de sesión de Google y en los controles antibot (#102).
+
+## v1.2.3 - 2026-10-16
+
+Desde el lanzamiento, muchas más personas de las esperadas han estado usando Mixdog, y les estamos verdaderamente agradecidos. Algunas partes aún son inestables y las estamos solucionando lo más rápido posible. Sus problemas y solicitudes de extracción dieron forma a gran parte de esta versión. Si algo sale mal, háganoslo saber en **Configuración → Acerca de → Comentarios**.
+
+¿Nuevo en el razonamiento automático? Un pequeño modelo de evaluación en su PC elige la intensidad con la que el modelo piensa para cada mensaje y paso. Descubra cómo funciona y su rendimiento en Terminal-Bench 2.1 en [Esfuerzo de razonamiento automático](https://github.com/tribgames/mixdog/blob/main/docs/auto-reasoning-effort.md).
+
+Se agregó el traslado de un chat a un worktree desde la isla del compositor, texto en streaming más fluido y un servicio en segundo plano más rápido y confiable.
+
+### Nuevas funciones
+
+- **Worktrees desde la isla** — Se agregó un segmento de rama a la isla del compositor que traslada un chat a un worktree, llevando o dejando los cambios no confirmados.
+- **Tarjetas de preguntas** — Se agregó una tarjeta para las preguntas que un agente le hace, en la aplicación de escritorio y en la TUI.
+- **`/btw`** — Se agregó `/btw` para hacer una pregunta rápida sin interrumpir la tarea actual.
+- **Herramienta de sesión** — Se agregó una herramienta que permite al agente renombrar, compactar, bifurcar y mover la sesión actual (#14, thanks @hyeon1035298).
+- **Varias PC en Android** — Se agregó el cambio entre hasta 16 PC guardadas en la aplicación de Android (#83, thanks @yupguni).
+- **Recuperar ediciones interrumpidas** — Se agregó un panel de recuperación que muestra las ediciones de archivos interrumpidas por una caída y las restaura o descarta de forma segura (#60, thanks @22nsuk).
+
+### Cambios
+
+- Se cambiaron las respuestas en streaming para que aparezcan de forma fluida a medida que se escriben en lugar de ráfagas línea por línea.
+- Se cambiaron la acción de salir, los chats nuevos y el panel de Cambios para que respondan mucho más rápido.
+- Se cambiaron los esquemas de herramientas MCP para que se conviertan según cada proveedor, de modo que las herramientas que funcionan en otras aplicaciones funcionen en Mixdog; una herramienta rota se omite con un aviso.
+- Se cambiaron los totales de uso para que permanezcan ocultos cuando un proveedor no informó el uso de cada llamada (#90, #91, thanks @22nsuk).
+- Se cambió el traslado de cambios a un worktree para rechazar archivos que Git oculta de status, evitando perder ediciones.
+- Se cambiaron las copias de seguridad de la configuración para que permanezcan en cada perfil, de modo que la configuración de un perfil nunca sea sobrescrita por otro.
+- Se cambió la franja de versiones de Visualize a un menú de Versiones, y se agregaron el renombramiento de pestañas mediante doble clic y el resaltado de comandos con barra.
+- Se cambiaron los iconos de los proveedores por los logotipos oficiales.
+- Se cambió el razonamiento automático para que también se ejecute en las rutas de inicio de sesión de ChatGPT.
+
+### Correcciones de errores
+
+- Se corrigió que los modelos de Claude en Antigravity fallaran con HTTP 400 debido a los esquemas de herramientas (#80, thanks @ProofPage).
+- Se corrigió que el botón de Nueva rama en el chat no hiciera nada (#85, thanks @oh1701).
+- Se corrigió que los agentes recién iniciados no vieran las herramientas MCP en su primer turno (#88, thanks @oh1701).
+- Se corrigió que el servicio en segundo plano se congelara al eliminar sesiones y que las sesiones eliminadas o sus pestañas volvieran a aparecer.
+- Se corrigió que la base de datos a veces permaneciera abierta tras salir de la aplicación.
+- Se corrigió que el primer mensaje tras cambiar el modelo de un chat fallara con "Session state changed unexpectedly".
+- Se corrigió que el botón Atrás de Android no cerrara el panel lateral derecho.
+- Se corrigió que el nombre de rama de la isla apareciera tarde y desplazara el diseño, y que las filas de shell parpadearan al finalizar un comando.
+- Se corrigió que el panel lateral permaneciera abierto tras cerrar su última pestaña y que el panel de Visualize permaneciera contraído al abrirse un elemento visual.
+- Se corrigió que los interruptores de proveedores para desarrolladores aparecieran desactivados tras activarlos y que los errores de proveedores personalizados mostraran mensajes internos.
+- Se corrigió que la transcripción saltara cuando el compositor cambiaba de altura.
+
+### Otros
+
+- Se corrigió un error de compilación de escritorio (#89, thanks @22nsuk).
+
+## v1.2.2 - 2026-10-14
+
+Se agregaron inicio de sesión explícito mediante OAuth para MCP, cambio de modelo en el lugar y un banner de cuota de una sola línea.
+
+### Nuevas funciones
+
+- **Inicio de sesión en MCP** — Se agregó inicio de sesión explícito mediante OAuth para servidores MCP con estado, diálogo de inicio de sesión compartido, pegado remoto y comandos TUI (#74, thanks @oh1701).
+- **Cambiar modelo en el lugar** — Se agregó el cambio de modelo en el chat sin iniciar una nueva sesión, y Bifurcar en el menú de sesión (#73, #52, thanks @grapefruit0205).
+- **Banner de cuota** — Se agregó un banner de una línea sobre el compositor al alcanzar un límite; Reanudar reserva la siguiente ejecución para la hora de reinicio.
+- **Menú de archivos** — Se agregó un contador de archivos en la isla que rastrea cambios no confirmados de la sesión, con Ver cambios y Eliminar historial.
+- **Tamaño de texto del chat** — Se agregó un ajuste del tamaño de texto del chat por dispositivo.
+
+### Cambios
+
+- Se cambiaron los reintentos de proveedores para respetar los límites y tiempos de espera propios de cada proveedor, mostrando el tiempo restante con opción de cancelar.
+- Se cambiaron los mensajes de error para indicar la causa y el siguiente paso, y ocultar Reintentar cuando reintentar no sirva de ayuda.
+- Se cambiaron los comandos de shell para permanecer en primer plano durante 10 segundos por defecto, hasta 30 segundos, antes de pasar a segundo plano.
+- Se ajustaron la aplicación de escritorio, el razonamiento automático y el servicio en segundo plano para usar menos sondeos, renderizado y memoria en sesiones largas.
+
+### Correcciones de errores
+
+- Se corrigió que el servicio en segundo plano se congelara entre uno y dos segundos cada 30 minutos.
+- Se corrigió que se perdieran los avisos de finalización de agentes al cancelar un turno que ya tenía salida.
+- Se corrigió que la isla del compositor mostrara agentes en ejecución como inactivos o terminados.
+- Se corrigió que el cambio de sesiones se detuviera al esperar los escaneos de cambios de otras sesiones.
+- Se corrigió que los diálogos de página del navegador salieran del panel, la confirmación de salida no se completara y los atajos de copia del navegador fallaran.
+- Se corrigió que fallara el almacenamiento en caché de instrucciones en proveedores personalizados de Responses y que los proyectos de sesión heredados no coincidieran con la barra lateral (#70, #75, thanks @sukjong2002).
+- Se corrigió que las tablas en streaming parpadearan, la transcripción saltara mientras un turno trabaja y la tarjeta de cuota permaneciera tras cambiar de proveedor.
+
+### Otros
+
+- Se eliminaron helpers sin usar (#67, thanks @22nsuk).
+
 ## v1.2.1 - 2026-10-14
 
 Se añadió la importación de conversaciones de Codex y Claude Code, el proveedor Command Code y menciones de skills con `$`, y se corrigió la observación de entrada de Computer Use, los scripts de skills, el razonamiento automático y varios fallos de sesiones.

@@ -1,3 +1,4 @@
+import { isVisibleStreamProgress } from '../../../shared/stream-progress.mjs';
 import { anthropicEffortLevelsFor, normalizeAnthropicEffortInput } from './anthropic-effort.mjs';
 import { CUSTOM_EFFORT_LEVELS, customEffortLevels, isCustomProviderName } from './custom-reasoning.mjs';
 import { codexModelSupportsEffortUpdates } from './openai-oauth-catalog.mjs';
@@ -7,6 +8,9 @@ export const EFFORT_CONFIGURATION_BETA = 'mid-conversation-output-config-2026-07
 // first version checked on the wire (update accepted, prompt cache kept), and
 // every later version of that family. A model that turns out to reject the
 // update is switched off at runtime (markEffortConfigurationUnsupported).
+// The Anthropic catalogs publish no per-model flag for it, so a measured
+// floor is kept for the families already checked: below it the rejection is
+// certain, and every request would pay a failed attempt first.
 const ANTHROPIC_MIN_VERSION = Object.freeze({
   opus: [5, 0],
   sonnet: [5, 5],
@@ -14,6 +18,10 @@ const ANTHROPIC_MIN_VERSION = Object.freeze({
   fable: [5, 1],
   mythos: [5, 1],
 });
+// A family not measured yet starts at the earliest checked major, on the
+// routes that replay a rejected update (the rest cannot recover from one).
+const ANTHROPIC_FIRST_MAJOR = Math.min(...Object.values(ANTHROPIC_MIN_VERSION).map(([major]) => major));
+const ANTHROPIC_REPLAYING_PROVIDERS = new Set(['anthropic-oauth']);
 // https://developers.openai.com/api/docs/guides/reasoning#change-reasoning-mid-conversation
 // — GPT-6 and later, standard single-agent mode. The public API publishes no
 // per-model flag, so the version is its whole answer; the OAuth backend's
@@ -25,14 +33,19 @@ function versionAtLeast([major, minor], [minMajor, minMinor]) {
   return major > minMajor || (major === minMajor && minor >= minMinor);
 }
 
-function anthropicVersionSupported(id) {
+function anthropicVersionSupported(provider, id) {
   const m = id.match(/^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?$/);
-  const floor = m && ANTHROPIC_MIN_VERSION[m[1]];
-  return Boolean(floor) && versionAtLeast([Number(m[2]), Number(m[3] || 0)], floor);
+  if (!m) return false;
+  const version = [Number(m[2]), Number(m[3] || 0)];
+  const floor = ANTHROPIC_MIN_VERSION[m[1]];
+  if (floor) return versionAtLeast(version, floor);
+  return ANTHROPIC_REPLAYING_PROVIDERS.has(provider) && version[0] >= ANTHROPIC_FIRST_MAJOR;
 }
 
+// Any `gpt-<major>` id, whatever follows the major (tier names, minors,
+// snapshots), so a later naming scheme needs no edit.
 function openAiVersionSupported(id) {
-  const m = id.match(/^gpt-(\d+)(?:-\d+)?(?:-[a-z]+)?$/);
+  const m = id.match(/^gpt-(\d+)(?:-|$)/);
   return Boolean(m) && Number(m[1]) >= OPENAI_MIN_MAJOR;
 }
 
@@ -60,19 +73,40 @@ export function isEffortConfigurationRejection(status, text) {
 /**
  * Runs `send(opts)`; when the model rejects the mid-conversation effort
  * update, switches the updates off for it and replays the request once
- * without them. The rejection happens before any output streams.
+ * without them. Never replay after output reached the caller, cancellation,
+ * or an explicit opt-out; a late error is not evidence of missing support.
  */
 export async function withEffortConfigurationFallback(provider, model, opts, send) {
+  let streamed = false;
+  const track =
+    (callback, isProgress = false) =>
+    (...args) => {
+      if (!isProgress || isVisibleStreamProgress(args[0])) streamed = true;
+      return callback(...args);
+    };
+  const tracked = { ...opts };
+  if (typeof opts?.onStreamDelta === 'function') tracked.onStreamDelta = track(opts.onStreamDelta, true);
+  if (typeof opts?.onTextDelta === 'function') tracked.onTextDelta = track(opts.onTextDelta);
+  if (typeof opts?.onToolCall === 'function') tracked.onToolCall = track(opts.onToolCall);
   try {
-    return await send(opts);
+    return await send(tracked);
   } catch (error) {
     const status = error?.status ?? error?.httpStatus;
-    if (opts?._effortConfigurationRetry || !isEffortConfigurationRejection(status, error?.message)) throw error;
+    const emitted =
+      streamed || error?.liveTextEmitted === true || error?.emittedToolCall === true || error?.unsafeToRetry === true;
+    if (
+      opts?._effortConfigurationRetry ||
+      opts?.effortConfigurationEnabled === false ||
+      opts?.signal?.aborted ||
+      emitted ||
+      !isEffortConfigurationRejection(status, error?.message)
+    )
+      throw error;
     markEffortConfigurationUnsupported(provider, model);
     process.stderr.write(
       `[${provider}] ${model} rejected the mid-conversation effort update; retrying once without it\n`
     );
-    return send({ ...opts, effortConfigurationEnabled: false, _effortConfigurationRetry: true });
+    return send({ ...tracked, effortConfigurationEnabled: false, _effortConfigurationRetry: true });
   }
 }
 const OPENAI_PROVIDERS = new Set(['openai', 'openai-oauth']);
@@ -136,7 +170,7 @@ export function effortConfigurationMode(provider, model, opts = {}) {
   }
   if (
     ANTHROPIC_PROVIDERS.has(provider) &&
-    anthropicVersionSupported(id) &&
+    anthropicVersionSupported(provider, id) &&
     opts.disableBetaHeaders !== true &&
     (!opts.baseURL || /^https:\/\/api\.anthropic\.com(?:\/|$)/.test(opts.baseURL))
   )
@@ -171,7 +205,9 @@ export function autoEffortModel(providerName, providerImpl, model) {
     // list from falling back to a family ladder.
     return { id: model, reasoningLevels: anthropicEffortLevelsFor(model), customReasoning: true };
   }
-  if (!isCustomProviderName(providerName)) return { id: model };
+  // Every other route reads the provider's own cached model row, the source
+  // route resolution (lookupModelMeta) uses; a bare id has no levels and
+  // skips the judge.
   return { ...(providerImpl?.getCachedModelInfo?.(model) || {}), id: model };
 }
 

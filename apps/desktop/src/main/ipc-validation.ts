@@ -42,7 +42,8 @@ import {
   VISUALIZE_INLINE_KINDS,
   type VisualizeInlineContent,
 } from '../shared/visualize';
-import { requiredSessionId } from './desktop-state';
+import { requiredSessionId, requiredSessionIds } from './desktop-state';
+import { hasControlCharacter } from './ipc-control-chars';
 import { isWorktreeCapability, validateWorktreeCapabilityArgs, WORKTREE_CAPABILITY_ARITY } from './worktree-validation';
 import { IMPORT_CAPABILITY_ARITY, isImportCapability, validateImportCapabilityArgs } from './import-validation';
 
@@ -85,117 +86,126 @@ export function requiredVisualizeTabCommand(value: unknown): DesktopVisualizeTab
     sessionId: requiredSessionId(command.sessionId),
     tabId: requiredString(command.tabId, 'visualize tab id', 64),
   };
-  if (action === 'export') {
-    const { format, pane } = command;
-    if (format !== 'png' && format !== 'pdf' && format !== 'project') {
-      throw new TypeError('visualize export format must be png, pdf, or project.');
-    }
-    if (pane !== undefined && (typeof pane !== 'number' || !Number.isInteger(pane) || pane < 0 || pane > 15)) {
-      throw new TypeError('visualize pane index is invalid.');
-    }
-    return { ...base, action, format, ...(pane !== undefined ? { pane } : {}) };
-  }
-  if (action === 'reopen') {
-    // A closed tab's file targets, from its chat card: 1-3 paths, never URLs;
-    // or the inline content it showed (fully validated again by the open).
-    const content = command.content;
-    if (content !== undefined) {
-      const item = content && typeof content === 'object' ? (content as Record<string, unknown>) : {};
-      if (
-        !VISUALIZE_INLINE_KINDS.some((kind) => kind === item.kind) ||
-        typeof item.source !== 'string' ||
-        item.source.length > MAX_VISUALIZE_INLINE_BYTES ||
-        (item.title !== undefined && (typeof item.title !== 'string' || item.title.length > 120)) ||
-        (command.label !== undefined && (typeof command.label !== 'string' || command.label.length > 120))
-      ) {
-        throw new TypeError('visualize reopen content is invalid.');
-      }
-      return {
-        ...base,
-        action,
-        targets: [],
-        content: {
-          kind: item.kind as VisualizeInlineContent['kind'],
-          source: item.source,
-          ...(typeof item.title === 'string' && item.title ? { title: item.title } : {}),
-        },
-        ...(typeof command.label === 'string' && command.label ? { label: command.label } : {}),
-      };
-    }
-    const targets = command.targets;
-    if (
-      !Array.isArray(targets) ||
-      targets.length < 1 ||
-      targets.length > 3 ||
-      targets.some(
-        (target) =>
-          typeof target !== 'string' ||
-          !target.trim() ||
-          target.length > 4096 ||
-          /^[a-z][a-z0-9+.-]*:\/\//i.test(target)
-      )
-    ) {
-      throw new TypeError('visualize reopen targets must be 1-3 file paths.');
-    }
-    if (command.label !== undefined && (typeof command.label !== 'string' || command.label.length > 120)) {
-      throw new TypeError('visualize reopen label is invalid.');
-    }
-    return {
-      ...base,
-      action,
-      targets: [...targets],
-      ...(typeof command.label === 'string' && command.label ? { label: command.label } : {}),
-    };
-  }
+  if (action === 'export') return visualizeExportCommand(base, command);
+  if (action === 'reopen') return visualizeReopenCommand(base, command);
   if (action === 'network') {
     if (typeof command.allow !== 'boolean') throw new TypeError('visualize network allow must be a boolean.');
     return { ...base, action, allow: command.allow };
   }
-  if (action === 'version') {
-    if (command.compare !== undefined && typeof command.compare !== 'boolean') {
-      throw new TypeError('visualize compare must be a boolean.');
-    }
-    return {
-      ...base,
-      action,
-      version: command.version === null ? null : visualizeVersionNumber(command.version),
-      ...(command.compare === true ? { compare: true } : {}),
-    };
-  }
-  if (action === 'render') {
-    // An inline pane's render result; a failure carries its (clipped) error.
-    const { pane, error } = command;
-    if (typeof pane !== 'number' || !Number.isInteger(pane) || pane < 0 || pane > 15) {
-      throw new TypeError('visualize pane index is invalid.');
-    }
-    if (error !== undefined && typeof error !== 'string') throw new TypeError('visualize render error must be text.');
-    return {
-      ...base,
-      action,
-      pane,
-      renderId: requiredString(command.renderId, 'visualize render id', 128),
-      ...(error ? { error: error.slice(0, 4000) } : {}),
-    };
-  }
-  if (action === 'restore') {
-    // The page assets the user confirmed the restore may also overwrite.
-    const assets = command.assets;
-    if (
-      assets !== undefined &&
-      (!Array.isArray(assets) ||
-        assets.length > 64 ||
-        assets.some((rel) => typeof rel !== 'string' || !rel || rel.length > 1024))
-    ) {
-      throw new TypeError('visualize restore assets must be a list of file paths.');
-    }
-    return {
-      ...base,
-      action,
-      version: visualizeVersionNumber(command.version),
-      ...(Array.isArray(assets) && assets.length ? { assets: [...assets] } : {}),
-    };
-  }
+  if (action === 'version') return visualizeVersionCommand(base, command);
+  if (action === 'render') return visualizeRenderCommand(base, command);
+  if (action === 'restore') return visualizeRestoreCommand(base, command);
   return { ...base, action };
+}
+
+type VisualizeCommandInput = Record<string, unknown>;
+type VisualizeTabBase = { sessionId: string; tabId: string };
+
+const isVisualizePaneIndex = (pane: unknown): pane is number =>
+  typeof pane === 'number' && Number.isInteger(pane) && pane >= 0 && pane <= 15;
+
+function visualizeExportCommand(base: VisualizeTabBase, command: VisualizeCommandInput): DesktopVisualizeTabCommand {
+  const { format, pane } = command;
+  if (format !== 'png' && format !== 'pdf' && format !== 'project') {
+    throw new TypeError('visualize export format must be png, pdf, or project.');
+  }
+  if (pane !== undefined && !isVisualizePaneIndex(pane)) {
+    throw new TypeError('visualize pane index is invalid.');
+  }
+  return { ...base, action: 'export', format, ...(pane !== undefined ? { pane } : {}) };
+}
+
+/** A closed tab's file targets, from its chat card: 1-3 paths, never URLs;
+ *  or the inline content it showed (fully validated again by the open). */
+function visualizeReopenCommand(base: VisualizeTabBase, command: VisualizeCommandInput): DesktopVisualizeTabCommand {
+  const label = typeof command.label === 'string' && command.label ? { label: command.label } : {};
+  const content = command.content;
+  if (content !== undefined) {
+    const item = content && typeof content === 'object' ? (content as Record<string, unknown>) : {};
+    if (
+      !VISUALIZE_INLINE_KINDS.some((kind) => kind === item.kind) ||
+      typeof item.source !== 'string' ||
+      item.source.length > MAX_VISUALIZE_INLINE_BYTES ||
+      (item.title !== undefined && (typeof item.title !== 'string' || item.title.length > 120)) ||
+      (command.label !== undefined && (typeof command.label !== 'string' || command.label.length > 120))
+    ) {
+      throw new TypeError('visualize reopen content is invalid.');
+    }
+    return {
+      ...base,
+      action: 'reopen',
+      targets: [],
+      content: {
+        kind: item.kind as VisualizeInlineContent['kind'],
+        source: item.source,
+        ...(typeof item.title === 'string' && item.title ? { title: item.title } : {}),
+      },
+      ...label,
+    };
+  }
+  const targets = command.targets;
+  if (
+    !Array.isArray(targets) ||
+    targets.length < 1 ||
+    targets.length > 3 ||
+    targets.some(
+      (target) =>
+        typeof target !== 'string' || !target.trim() || target.length > 4096 || /^[a-z][a-z0-9+.-]*:\/\//i.test(target)
+    )
+  ) {
+    throw new TypeError('visualize reopen targets must be 1-3 file paths.');
+  }
+  if (command.label !== undefined && (typeof command.label !== 'string' || command.label.length > 120)) {
+    throw new TypeError('visualize reopen label is invalid.');
+  }
+  return { ...base, action: 'reopen', targets: [...targets], ...label };
+}
+
+function visualizeVersionCommand(base: VisualizeTabBase, command: VisualizeCommandInput): DesktopVisualizeTabCommand {
+  if (command.compare !== undefined && typeof command.compare !== 'boolean') {
+    throw new TypeError('visualize compare must be a boolean.');
+  }
+  return {
+    ...base,
+    action: 'version',
+    version: command.version === null ? null : visualizeVersionNumber(command.version),
+    ...(command.compare === true ? { compare: true } : {}),
+  };
+}
+
+/** An inline pane's render result; a failure carries its (clipped) error. */
+function visualizeRenderCommand(base: VisualizeTabBase, command: VisualizeCommandInput): DesktopVisualizeTabCommand {
+  const { pane, error } = command;
+  if (!isVisualizePaneIndex(pane)) {
+    throw new TypeError('visualize pane index is invalid.');
+  }
+  if (error !== undefined && typeof error !== 'string') throw new TypeError('visualize render error must be text.');
+  return {
+    ...base,
+    action: 'render',
+    pane,
+    renderId: requiredString(command.renderId, 'visualize render id', 128),
+    ...(error ? { error: error.slice(0, 4000) } : {}),
+  };
+}
+
+/** The page assets the user confirmed the restore may also overwrite. */
+function visualizeRestoreCommand(base: VisualizeTabBase, command: VisualizeCommandInput): DesktopVisualizeTabCommand {
+  const assets = command.assets;
+  if (
+    assets !== undefined &&
+    (!Array.isArray(assets) ||
+      assets.length > 64 ||
+      assets.some((rel) => typeof rel !== 'string' || !rel || rel.length > 1024))
+  ) {
+    throw new TypeError('visualize restore assets must be a list of file paths.');
+  }
+  return {
+    ...base,
+    action: 'restore',
+    version: visualizeVersionNumber(command.version),
+    ...(Array.isArray(assets) && assets.length ? { assets: [...assets] } : {}),
+  };
 }
 
 /** The pane a `data-choice` pick came from: `{ sessionId, tabId, pane }`. */
@@ -203,7 +213,7 @@ export function requiredVisualizeGestureTarget(value: unknown): { sessionId: str
   const target = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
   const { sessionId, tabId } = requiredVisualizeTabCommand({ ...target, action: 'activate' });
   const pane = target.pane;
-  if (typeof pane !== 'number' || !Number.isInteger(pane) || pane < 0 || pane > 15) {
+  if (!isVisualizePaneIndex(pane)) {
     throw new TypeError('visualize pane index is invalid.');
   }
   return { sessionId, tabId, pane };
@@ -235,6 +245,7 @@ const READ_CAPABILITY_SET = new Set<string>(DESKTOP_READ_CAPABILITIES);
 const BOOLEAN_FIRST_CAPABILITIES = new Set<DesktopCapability>([
   'setAutoUpdate',
   'setRecapEnabled',
+  'setAiSessionTitles',
   'setWebSearchEnabled',
   'setMemoryToolsEnabled',
   'toggleVoice',
@@ -273,14 +284,23 @@ const MODEL_SELECTION_KEYS = new Set([
 const MODEL_CATALOG_OPTION_KEYS = new Set(['force', 'refresh', 'quick']);
 const PROVIDER_SETUP_OPTION_KEYS = new Set(['force', 'refresh', 'unlockKeychain', 'recheckKeychain']);
 const SKILLS_STATUS_OPTION_KEYS = new Set(['projectPath']);
-const TOOL_APPROVAL_KEYS = new Set(['approved', 'reason']);
-const TOGGLEABLE_BUILTIN_TOOLS = new Set(['git', 'office', 'localProvider', 'tidy', 'autoEffort', 'visualize']);
+const TOOL_APPROVAL_KEYS = new Set(['approved', 'reason', 'answers', 'reply']);
+const TOGGLEABLE_BUILTIN_TOOLS = new Set([
+  'git',
+  'office',
+  'localProvider',
+  'tidy',
+  'autoEffort',
+  'visualize',
+  'media',
+]);
 const INSTALLABLE_BUILTIN_FEATURES = new Set(['git', 'memory', 'office', 'localProvider', 'tidy', 'autoEffort']);
 
 const CAPABILITY_ARITY = {
   prioritizeQueued: [1, 1],
   restoreQueued: [0, 2],
   rewindToItem: [1, 1],
+  retryFailedTurn: [2, 2],
   setEffort: [1, 1],
   setToolMode: [1, 1],
   getAutoClear: [0, 0],
@@ -296,6 +316,8 @@ const CAPABILITY_ARITY = {
   setCompactionSettings: [0, 1],
   getRecapSettings: [0, 0],
   setRecapEnabled: [1, 1],
+  getSessionTitleSettings: [0, 0],
+  setAiSessionTitles: [1, 1],
   getToolModuleSettings: [0, 0],
   setWebSearchEnabled: [1, 1],
   setInstructionFiles: [1, 1],
@@ -334,6 +356,12 @@ const CAPABILITY_ARITY = {
   saveMcpServer: [1, 1],
   removeMcpServer: [1, 1],
   setMcpServerEnabled: [2, 2],
+  beginMcpOAuthLogin: [1, 2],
+  getMcpOAuthLoginStatus: [1, 1],
+  cancelMcpOAuthLogin: [1, 1],
+  completeMcpOAuthLogin: [2, 2],
+  signOutMcpServer: [1, 1],
+  probeMcpServerAuth: [1, 1],
   getDisabledSkills: [0, 0],
   setDisabledSkills: [1, 1],
   setExtensionScope: [2, 3],
@@ -355,6 +383,8 @@ const CAPABILITY_ARITY = {
   recall: [1, 2],
   runDoctor: [0, 0],
   compact: [0, 0],
+  askSide: [1, 1],
+  cancelSide: [0, 0],
   listPresets: [0, 0],
   setModel: [1, 1],
   getWebSearchRoute: [0, 0],
@@ -387,15 +417,18 @@ const CAPABILITY_ARITY = {
   getUsageDashboard: [0, 1],
   getUsageStats: [0, 1],
   getQuotaHistory: [0, 1],
-  getSessionUsage: [0, 0],
+  getSessionUsage: [0, 1],
   consumeCodexRateLimitResetCredit: [1, 1],
   getSessionReviewDiff: [0, 0],
+  getSessionReviewFilePatch: [1, 2],
   getTurnReviewDiff: [0, 1],
+  getTurnReviewFilePatch: [1, 1],
   revertTurnReview: [0, 1],
   revertTurnReviewFile: [1, 2],
   getTurnChanges: [1, 1],
   revertTurnChanges: [3, 3],
   reapplyTurnChanges: [3, 3],
+  clearSessionChangeHistory: [0, 0],
   getOnboardingStatus: [0, 0],
   skipOnboarding: [0, 0],
   completeOnboarding: [0, 1],
@@ -410,6 +443,7 @@ const CAPABILITY_ARITY = {
   removeCustomProvider: [1, 1],
   updateCustomProviderModel: [3, 3],
   testCustomProvider: [1, 1],
+  checkCustomProviderKeyEnv: [1, 1],
   discoverCustomProviderModels: [1, 1],
   saveOpenCodeGoUsageAuth: [1, 1],
   saveOpenAIUsageSessionKey: [1, 1],
@@ -437,6 +471,8 @@ const CAPABILITY_ARITY = {
   getMediaJob: [1, 1],
   getMediaDefault: [1, 1],
   setMediaDefault: [1, 1],
+  getMediaPins: [0, 0],
+  setMediaPin: [1, 1],
   startMediaJob: [1, 1],
   cancelMediaJob: [1, 1],
   deleteMediaAsset: [1, 1],
@@ -483,14 +519,19 @@ const CUSTOM_PROVIDER_KEYS = new Set([
   'protocol',
   'baseURL',
   'apiKey',
+  'apiKeyEnv',
   'models',
   'schemaVersion',
   'enabled',
   'auth',
   'discovery',
   'modelOverrides',
+  'wires',
+  'modelWires',
   'type',
 ]);
+// Wires a custom OpenAI-compatible endpoint can serve (custom-provider-config.mjs).
+const CUSTOM_WIRES = new Set(['chat', 'responses', 'messages']);
 const CUSTOM_MODEL_KEYS = new Set(['id', 'name', 'contextWindow', 'maxOutputTokens']);
 const CUSTOM_PROTOCOLS = new Set(['openai-chat', 'openai-responses', 'anthropic']);
 const CUSTOM_DISCOVERY_KEYS = new Set(['newModelsHidden']);
@@ -508,10 +549,9 @@ export const CUSTOM_MAX_WIRE_VALUE = 64;
 // Same transport rules as provider-admin.mjs (validateCustomTransportFields).
 export const CUSTOM_MAX_API_KEY = 65_536;
 const CUSTOM_PROVIDER_ID = /^custom-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CUSTOM_API_KEY_ENV = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CUSTOM_LEVEL_ALIASES: Readonly<Record<string, string>> = { ultra: 'max' };
-// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control characters is the point.
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 /** Canonical level like the runtime (trimmed, case-folded, `ultra` → `max`), or null. */
 function canonicalLevel(value: unknown): string | null {
@@ -523,7 +563,7 @@ function canonicalLevel(value: unknown): string | null {
 
 function boundedCustomText(value: unknown, name: string, maximum: number): string {
   const text = requiredString(value, name, maximum);
-  if (CONTROL_CHARS.test(text)) throw new TypeError(`${name} is invalid.`);
+  if (hasControlCharacter(text)) throw new TypeError(`${name} is invalid.`);
   return text;
 }
 
@@ -547,6 +587,15 @@ export function requiredCustomProviderInput(value: unknown, modelsOptional = fal
   if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length > CUSTOM_MAX_API_KEY)) {
     throw new TypeError('custom provider apiKey is invalid.');
   }
+  if (input.apiKeyEnv !== undefined && input.apiKeyEnv !== null) {
+    if (typeof input.apiKeyEnv !== 'string' || !CUSTOM_API_KEY_ENV.test(input.apiKeyEnv)) {
+      throw new TypeError('custom provider apiKeyEnv is invalid.');
+    }
+    if (input.auth === 'none') throw new TypeError('custom provider apiKeyEnv requires key auth.');
+    if (typeof input.apiKey === 'string' && input.apiKey !== '') {
+      throw new TypeError('custom provider apiKey and apiKeyEnv are mutually exclusive.');
+    }
+  }
   if (input.schemaVersion !== undefined && input.schemaVersion !== 2) {
     throw new TypeError('custom provider schemaVersion is invalid.');
   }
@@ -559,8 +608,37 @@ export function requiredCustomProviderInput(value: unknown, modelsOptional = fal
   if (input.type !== undefined && input.type !== 'custom') {
     throw new TypeError('custom provider type is invalid.');
   }
-  if ((input.discovery !== undefined || input.modelOverrides !== undefined) && input.schemaVersion !== 2) {
+  if (
+    (input.discovery !== undefined ||
+      input.modelOverrides !== undefined ||
+      input.wires !== undefined ||
+      input.modelWires !== undefined) &&
+    input.schemaVersion !== 2
+  ) {
     throw new TypeError('custom provider schemaVersion is invalid.');
+  }
+  // Shape only; the runtime ties them to the protocol and to each other.
+  if (input.wires !== undefined) {
+    if (
+      !Array.isArray(input.wires) ||
+      input.wires.length === 0 ||
+      input.wires.length > CUSTOM_WIRES.size ||
+      input.wires.some((wire) => typeof wire !== 'string' || !CUSTOM_WIRES.has(wire))
+    ) {
+      throw new TypeError('custom provider wires are invalid.');
+    }
+  }
+  if (input.modelWires !== undefined) {
+    const modelWires = plainRecord(input.modelWires, 'custom provider modelWires');
+    const ids = Object.keys(modelWires);
+    if (ids.length > CUSTOM_MAX_OVERRIDES) throw new TypeError('custom provider modelWires are too large.');
+    for (const modelId of ids) {
+      requireSafeModelId(modelId);
+      const wire = modelWires[modelId];
+      if (typeof wire !== 'string' || !CUSTOM_WIRES.has(wire)) {
+        throw new TypeError('custom provider modelWires are invalid.');
+      }
+    }
   }
   // v2 states models as modelOverrides; a legacy `models` list is unversioned only.
   if (input.schemaVersion === 2 && input.models !== undefined) {
@@ -606,7 +684,7 @@ function requireSafeModelId(modelId: string): void {
     !modelId.trim() ||
     modelId !== modelId.trim() ||
     modelId.length > CUSTOM_MAX_MODEL_ID ||
-    CONTROL_CHARS.test(modelId) ||
+    hasControlCharacter(modelId) ||
     UNSAFE_KEYS.has(modelId)
   ) {
     throw new TypeError('custom provider model id is invalid.');
@@ -676,7 +754,7 @@ function validateCustomModelOverride(value: unknown, patch: boolean, protocol?: 
         typeof wire !== 'string' ||
         !wire.trim() ||
         wire.trim().length > CUSTOM_MAX_WIRE_VALUE ||
-        CONTROL_CHARS.test(wire.trim())
+        hasControlCharacter(wire.trim())
       ) {
         throw new TypeError('custom provider reasoning wireValues are invalid.');
       }
@@ -708,7 +786,7 @@ function requireAllowedKeys(input: Record<string, unknown>, allowed: ReadonlySet
 export function projectDisplayName(value: unknown): string {
   if (typeof value !== 'string') throw new TypeError('alias must be a string.');
   const text = value.trim();
-  if (text.length > 120 || /[\u0000-\u001f\u007f]/.test(text)) {
+  if (text.length > 120 || hasControlCharacter(text)) {
     throw new TypeError('alias is invalid.');
   }
   return text;
@@ -717,7 +795,7 @@ export function projectDisplayName(value: unknown): string {
 export function sessionDisplayName(value: unknown): string {
   if (typeof value !== 'string') throw new TypeError('title must be a string.');
   const text = value.trim();
-  if (!text || text.length > 1_024 || /[\u0000-\u001f\u007f]/.test(text)) {
+  if (!text || text.length > 1_024 || hasControlCharacter(text)) {
     throw new TypeError('title is invalid.');
   }
   return text;
@@ -868,10 +946,7 @@ export function requiredSubmitOptions(value: unknown): DesktopSubmitOptions {
   requireAllowedKeys(input, SUBMIT_OPTION_KEYS, 'submit options');
   if (
     input.id !== undefined &&
-    (typeof input.id !== 'string' ||
-      !input.id.trim() ||
-      input.id.length > 256 ||
-      /[\u0000-\u001f\u007f]/.test(input.id))
+    (typeof input.id !== 'string' || !input.id.trim() || input.id.length > 256 || hasControlCharacter(input.id))
   ) {
     throw new TypeError('submit id is invalid.');
   }
@@ -939,11 +1014,18 @@ export function requiredNewTaskDraft(value: unknown): DesktopNewTaskDraft {
     const value = input.worktree;
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('worktree is invalid.');
     const record = value as Record<string, unknown>;
-    requireAllowedKeys(record, new Set(['confirmLarge']), 'new task worktree');
+    requireAllowedKeys(record, new Set(['confirmLarge', 'branch', 'create']), 'new task worktree');
     if (record.confirmLarge !== undefined && typeof record.confirmLarge !== 'boolean') {
       throw new TypeError('worktree.confirmLarge must be a boolean.');
     }
     worktree = record.confirmLarge === true ? { confirmLarge: true } : {};
+    if (record.branch !== undefined) worktree.branch = requiredString(record.branch, 'worktree.branch');
+    if (record.create !== undefined) {
+      if (typeof record.create !== 'boolean' || !worktree.branch) {
+        throw new TypeError('worktree.create requires a branch and must be a boolean.');
+      }
+      worktree.create = record.create;
+    }
   }
   return {
     ...(projectPath ? { projectPath } : {}),
@@ -992,23 +1074,75 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
     throw new TypeError(`capability ${capability} received an invalid number of arguments.`);
   }
   validateStructuredValue(args);
+  if (capability === 'retryFailedTurn') {
+    const target = requiredSessionId(args[0]);
+    requiredString(args[1], 'turn key', 512);
+    if (input.sessionId !== target) throw new TypeError('retry session must match the addressed session.');
+  }
   if (isWorktreeCapability(capability)) validateWorktreeCapabilityArgs(capability, args);
   if (isImportCapability(capability)) validateImportCapabilityArgs(capability, args);
-  if (capability === 'contextStatus' && args.length) {
-    const options = args[0];
-    if (!options || typeof options !== 'object' || Array.isArray(options)) {
-      throw new TypeError('context inspection options must be an object.');
-    }
-    const inspection = options as Record<string, unknown>;
-    requireAllowedKeys(inspection, new Set(['inspect', 'entryId', 'revision']), 'context inspection');
-    if (inspection.inspect !== true) throw new TypeError('context inspection requires inspect: true.');
-    if (inspection.entryId !== undefined) {
-      requiredString(inspection.entryId, 'context entry id', 128);
-      requiredString(inspection.revision, 'context revision', 64);
-    } else if (inspection.revision !== undefined) {
-      throw new TypeError('context revision requires an entry id.');
+  if (capability === 'contextStatus' && args.length) validateContextStatusArgs(args[0]);
+  if (capability === 'getSessionUsage' && args.length) validateSessionUsageArgs(args[0]);
+  validateSettingCapabilityArgs(capability, args);
+  validateLocalProviderCapabilityArgs(capability, args);
+  validateCredentialCapabilityArgs(capability, args);
+  validateTurnCapabilityArgs(capability, args);
+  if (capability === 'getProviderSetup' && args[0] !== undefined) {
+    const options = optionalPlainRecord(args[0]);
+    if (
+      !options ||
+      Object.entries(options).some(
+        ([key, option]) => !PROVIDER_SETUP_OPTION_KEYS.has(key) || typeof option !== 'boolean'
+      )
+    ) {
+      throw new TypeError('provider setup options are invalid.');
     }
   }
+  // A new-task draft asks for skills as its selected Project would see them.
+  // Only an absolute path passes here; the host then resolves it to a
+  // registered Project (or its managed worktree) and refuses anything else.
+  if (capability === 'skillsStatus' && args.length) {
+    const options = optionalPlainRecord(args[0]);
+    if (!options) throw new TypeError('skills status options are invalid.');
+    requireAllowedKeys(options, SKILLS_STATUS_OPTION_KEYS, 'skills status options');
+    const projectPath = requiredString(options.projectPath, 'projectPath', 4_096);
+    if (!pathIsAbsolute(projectPath) || projectPath.includes('\0')) throw new TypeError('projectPath is invalid.');
+  }
+  const sessionId =
+    input.sessionId === undefined || input.sessionId === null || input.sessionId === ''
+      ? undefined
+      : requiredSessionId(input.sessionId);
+  return { capability, args, ...(sessionId ? { sessionId } : {}) };
+}
+
+const optionalPlainRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+function validateContextStatusArgs(options: unknown): void {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('context inspection options must be an object.');
+  }
+  const inspection = options as Record<string, unknown>;
+  requireAllowedKeys(inspection, new Set(['inspect', 'entryId', 'revision']), 'context inspection');
+  if (inspection.inspect !== true) throw new TypeError('context inspection requires inspect: true.');
+  if (inspection.entryId !== undefined) {
+    requiredString(inspection.entryId, 'context entry id', 128);
+    requiredString(inspection.revision, 'context revision', 64);
+  } else if (inspection.revision !== undefined) {
+    throw new TypeError('context revision requires an entry id.');
+  }
+}
+
+/** The agent sessions whose ledger totals the composer island reads beside its own. */
+const MAX_SESSION_USAGE_IDS = 64;
+function validateSessionUsageArgs(options: unknown): void {
+  const request = optionalPlainRecord(options);
+  if (!request) throw new TypeError('session usage options must be an object.');
+  requireAllowedKeys(request, new Set(['sessionIds']), 'session usage options');
+  if (request.sessionIds !== undefined) requiredSessionIds(request.sessionIds, MAX_SESSION_USAGE_IDS);
+}
+
+function validateSettingCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
   if (BOOLEAN_FIRST_CAPABILITIES.has(capability) && typeof args[0] !== 'boolean') {
     throw new TypeError(`${capability} requires a boolean value.`);
   }
@@ -1019,13 +1153,18 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
     throw new TypeError(`${capability} requires a boolean value.`);
   }
   if (capability === 'setBuiltinToolEnabled' && !TOGGLEABLE_BUILTIN_TOOLS.has(args[0] as string)) {
-    throw new TypeError('setBuiltinToolEnabled requires git, office, localProvider, tidy, autoEffort, or visualize.');
+    throw new TypeError(
+      'setBuiltinToolEnabled requires git, office, localProvider, tidy, autoEffort, visualize, or media.'
+    );
   }
   if (capability === 'setDeveloperOption') requiredString(args[0], 'developer option id', 128);
   if (capability === 'installBuiltinFeature' && !INSTALLABLE_BUILTIN_FEATURES.has(args[0] as string)) {
     throw new TypeError('installBuiltinFeature requires git, memory, office, localProvider, or tidy.');
   }
   if (capability === 'setModel') requiredString(args[0], 'model selector', 512);
+}
+
+function validateLocalProviderCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
   if (capability === 'startLocalProviderInstallation') {
     if (args[0] !== 'runtime' && args[0] !== 'model') throw new TypeError('phase must be runtime or model.');
     if (args[0] === 'model') requiredString(args[1], 'modelId', 512);
@@ -1056,11 +1195,15 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
   ) {
     throw new TypeError('idleTtlSeconds must be an integer from 0 to 86400.');
   }
-  const validateSecret = (secret: unknown, name: string) => {
-    if (typeof secret !== 'string' || !secret.trim() || secret.length > 65_536) {
-      throw new TypeError(`${name} is invalid.`);
-    }
-  };
+}
+
+function validateSecret(secret: unknown, name: string): void {
+  if (typeof secret !== 'string' || !secret.trim() || secret.length > 65_536) {
+    throw new TypeError(`${name} is invalid.`);
+  }
+}
+
+function validateCredentialCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
   if (capability === 'saveProviderApiKey' || capability === 'authenticateProvider') {
     validateSecret(args[1], 'provider secret');
   }
@@ -1071,6 +1214,7 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
   ) {
     requiredCustomProviderInput(args[0], capability === 'discoverCustomProviderModels');
   }
+  if (capability === 'checkCustomProviderKeyEnv') requiredString(args[0], 'environment variable name', 128);
   if (capability === 'saveStarterGuideState') requiredStarterGuideState(args[0]);
   if (capability === 'updateCustomProviderModel') requiredCustomModelPatch(args[0], args[1], args[2]);
   if (capability === 'removeCustomProvider') requiredString(args[0], 'custom provider id', 128);
@@ -1078,19 +1222,22 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
     validateSecret(args[0], 'secret');
   }
   if (capability === 'saveOpenCodeGoUsageAuth') {
-    const options =
-      args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
+    const options = optionalPlainRecord(args[0]);
     if (!options) throw new TypeError('OpenCode Go usage auth is invalid.');
     validateSecret(options.apiKey, 'OpenCode console API key');
   }
+}
+
+function validateTurnCapabilityArgs(capability: DesktopCapability, args: readonly unknown[]): void {
+  // A /btw side question: one non-empty question text.
+  if (capability === 'askSide') requiredString(args[0], 'side question', MAX_PROMPT_LENGTH);
   if (capability === 'getTurnReviewDiff' && args[0] !== undefined) {
     // The turn review bar asks for `{ refresh, known, summary, poll }`: whether
     // to re-read the worktree before diffing, the tag of the review it already
     // shows, whether a collapsed bar can go without the patch text, and
     // whether its interval timer (`poll: 'background'`) sent the read.
     // Anything else is not a review option.
-    const options =
-      args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
+    const options = optionalPlainRecord(args[0]);
     if (
       !options ||
       Object.entries(options).some(([key, option]) => {
@@ -1102,10 +1249,14 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
       throw new TypeError('turn review options are invalid.');
     }
   }
+  if (capability === 'getSessionReviewFilePatch' || capability === 'getTurnReviewFilePatch') {
+    // `[file, oldPath?]`: one listed file (and a rename's source) of a review.
+    requiredString(args[0], 'file', 4_096);
+    if (args[1] !== undefined) requiredString(args[1], 'oldPath', 4_096);
+  }
   if (capability === 'getTurnChanges') {
     // `{ checkpointId, patch?, file? }`: one turn's recorded changes.
-    const options =
-      args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
+    const options = optionalPlainRecord(args[0]);
     if (!options) throw new TypeError('turn changes options are invalid.');
     requiredString(options.checkpointId, 'checkpointId', 512);
     for (const [key, option] of Object.entries(options)) {
@@ -1123,34 +1274,6 @@ export function requiredDesktopCapabilityRequest(value: unknown): DesktopCapabil
       throw new TypeError('revision must be a non-negative integer.');
     }
   }
-  if (capability === 'getProviderSetup' && args[0] !== undefined) {
-    const options =
-      args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
-    if (
-      !options ||
-      Object.entries(options).some(
-        ([key, option]) => !PROVIDER_SETUP_OPTION_KEYS.has(key) || typeof option !== 'boolean'
-      )
-    ) {
-      throw new TypeError('provider setup options are invalid.');
-    }
-  }
-  // A new-task draft asks for skills as its selected Project would see them.
-  // Only an absolute path passes here; the host then resolves it to a
-  // registered Project (or its managed worktree) and refuses anything else.
-  if (capability === 'skillsStatus' && args.length) {
-    const options =
-      args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Record<string, unknown>) : null;
-    if (!options) throw new TypeError('skills status options are invalid.');
-    requireAllowedKeys(options, SKILLS_STATUS_OPTION_KEYS, 'skills status options');
-    const projectPath = requiredString(options.projectPath, 'projectPath', 4_096);
-    if (!pathIsAbsolute(projectPath) || projectPath.includes('\0')) throw new TypeError('projectPath is invalid.');
-  }
-  const sessionId =
-    input.sessionId === undefined || input.sessionId === null || input.sessionId === ''
-      ? undefined
-      : requiredSessionId(input.sessionId);
-  return { capability, args, ...(sessionId ? { sessionId } : {}) };
 }
 
 export function requiredDesktopCapabilityReadRequests(value: unknown): DesktopCapabilityReadRequest[] {
@@ -1252,7 +1375,37 @@ export function requiredToolApprovalDecision(value: unknown): ToolApprovalDecisi
   if (decision.reason !== undefined && (typeof decision.reason !== 'string' || decision.reason.length > 4_096)) {
     throw new TypeError('decision.reason is invalid.');
   }
-  return { approved: decision.approved, reason: decision.reason };
+  const result: ToolApprovalDecision = { approved: decision.approved, reason: decision.reason };
+  if (decision.answers !== undefined) result.answers = requiredQuestionAnswers(decision.answers);
+  if (decision.reply !== undefined) {
+    if (typeof decision.reply !== 'string' || decision.reply.trim().length > 4_000) {
+      throw new TypeError('decision.reply is invalid.');
+    }
+    result.reply = decision.reply.trim();
+  }
+  return result;
+}
+
+function requiredQuestionAnswers(value: unknown): NonNullable<ToolApprovalDecision['answers']> {
+  if (!Array.isArray(value) || value.length > 4) throw new TypeError('decision.answers is invalid.');
+  return value.map((entry) => {
+    if (entry === null) return null;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+      throw new TypeError('decision.answers is invalid.');
+    requireAllowedKeys(entry as Record<string, unknown>, new Set(['selected', 'text']), 'decision.answers');
+    const { selected, text } = entry as { selected?: unknown; text?: unknown };
+    if (
+      !Array.isArray(selected) ||
+      selected.length > 4 ||
+      selected.some((label) => typeof label !== 'string' || label.length > 200)
+    ) {
+      throw new TypeError('decision.answers is invalid.');
+    }
+    if (text !== undefined && (typeof text !== 'string' || text.length > 4_000)) {
+      throw new TypeError('decision.answers is invalid.');
+    }
+    return text === undefined ? { selected: selected as string[] } : { selected: selected as string[], text };
+  });
 }
 
 export function requiredGitPaths(value: unknown): string[] {
@@ -1260,6 +1413,26 @@ export function requiredGitPaths(value: unknown): string[] {
     throw new TypeError('git paths are invalid.');
   }
   return value.map(requiredGitPath);
+}
+
+/** Island Git request: the listed files (may be empty) and an optional base branch. */
+export function requiredGitRequestContextInput(value: unknown): { paths: string[]; base: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('git request input is invalid.');
+  const { paths, base } = value as Record<string, unknown>;
+  if (!Array.isArray(paths) || paths.length > 500) throw new TypeError('git paths are invalid.');
+  return {
+    paths: paths.map(requiredGitPath),
+    base: base === undefined || base === '' ? '' : requiredGitBranchName(base),
+  };
+}
+
+export function requiredReviewDiffFiles(value: unknown): { path: string; untracked: boolean }[] {
+  if (!Array.isArray(value) || value.length > 512) throw new TypeError('git review files are invalid.');
+  return value.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) throw new TypeError('git review file is invalid.');
+    const { path, untracked } = entry as { path?: unknown; untracked?: unknown };
+    return { path: requiredGitPath(path), untracked: untracked === true };
+  });
 }
 
 export function requiredGitPath(value: unknown): string {

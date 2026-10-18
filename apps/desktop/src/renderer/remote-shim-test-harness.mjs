@@ -166,6 +166,7 @@ export const withShim = async ({ secure = true } = {}, run) => {
       browserSessionTabs = false,
       termSizeOwner = false,
       hostDirectories = false,
+      projectRecovery = false,
       nativePush = false,
       routeAutoEffort = false,
       visualize = false,
@@ -196,6 +197,7 @@ export const withShim = async ({ secure = true } = {}, run) => {
         ...(browserSessionTabs ? { browserSessionTabs: 1 } : {}),
         ...(termSizeOwner ? { termSizeOwner: 1 } : {}),
         ...(hostDirectories ? { hostDirectories: 1 } : {}),
+        ...(projectRecovery ? { projectRecovery: 1 } : {}),
         ...(nativePush ? { nativePush: 1 } : {}),
         ...(routeAutoEffort ? { routeAutoEffort: 1 } : {}),
         ...(visualize ? { visualize: 1 } : {}),
@@ -226,6 +228,8 @@ export const withShim = async ({ secure = true } = {}, run) => {
       events,
       timers,
       dial,
+      /** The desktop identity this shim is paired with, for hand-driven handshakes. */
+      identity,
       resyncs: () => resyncs,
       /** The 20-second per-call deadlines currently armed. */
       deadlines: () => [...timers.live.values()].filter((timer) => timer.ms === 20_000).length,

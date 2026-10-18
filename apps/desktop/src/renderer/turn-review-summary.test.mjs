@@ -50,6 +50,59 @@ test('tracker counts sent as files fill a collapsed bar without the patch', asyn
   assert.match(text, /-3/);
 });
 
+// A Git project's island counts the selected Changes source (uncommitted by
+// default) from Git itself, never the runtime's session diff; Git evidence
+// re-reads it, and at zero files it hides.
+test('the island segment counts the Changes source and hides when it has no files', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  let files = [{ path: 'b.ts', status: 'M', additions: 4, deletions: 1, untracked: false }];
+  const reviews = [];
+  const capabilities = [];
+  const { dom, root } = installReviewDom(t, {
+    desktop: {
+      gitReview: async (cwd, source) => {
+        reviews.push([cwd, source]);
+        return { repository: true, root: 'C:/island-repo', base: 'HEAD', files };
+      },
+      invokeCapability: async ({ capability }) => {
+        capabilities.push(capability);
+        return { value: { supported: true, files: [], patch: '', agents: [] } };
+      },
+    },
+  });
+  const settle = (ms = 0) =>
+    act(async () => {
+      t.mock.timers.tick(ms);
+      for (let index = 0; index < 6; index += 1) await Promise.resolve();
+    });
+  await act(async () =>
+    root.render(
+      React.createElement(TurnReviewBar, {
+        variant: 'segment',
+        items: [],
+        cwd: 'C:/island-repo',
+        sessionId: 'island-uncommitted',
+        active: true,
+        busy: false,
+        onOpenChanges() {},
+      })
+    )
+  );
+  await settle();
+  const segment = () => dom.window.document.querySelector('.turn-review-segment');
+  assert.equal(segment()?.getAttribute('title'), 'Files 1');
+  assert.equal(segment().getAttribute('aria-label'), 'Uncommitted');
+  assert.equal(segment().querySelector('.diff-stats').textContent, '+4 −1');
+  assert.deepEqual(reviews, [['C:/island-repo', 'uncommitted']]);
+  assert.equal(capabilities.includes('getSessionReviewDiff'), false, 'a Git root never reads the session diff');
+  // A commit lands; a Git action announces it and the watch re-reads.
+  files = [];
+  await act(async () => dom.window.dispatchEvent(new dom.window.Event('mixdog:git-changed')));
+  await settle(3_500);
+  assert.equal(reviews.length, 2);
+  assert.equal(segment(), null, 'nothing uncommitted: the segment hides');
+});
+
 // A phone's collapsed bar asks for files and counts only; opening it asks for
 // the patch text it is about to draw.
 test('a collapsed bar on a phone reads a summary, an opened one reads in full', async (t) => {

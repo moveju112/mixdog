@@ -17,8 +17,10 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { anchoredPanelGeometry, anchoredPanelStyle, paneBounds } from './anchored-panel';
 import { t } from './i18n';
 import { useMobileBack } from './mobile-back';
+import { useRowMenuClamp } from './row-menu-geometry';
 import { useMobileRemoteSurface } from './mobile-surface';
 import { commitImmediateOverlay } from './immediate-overlay';
 import { usePhoneDockSwitchActions } from './phone-dock-switch';
@@ -49,6 +51,10 @@ export interface DockAction {
   detail?: string;
   /** Menu only: a hairline above this item starts a new group. */
   separatorBefore?: boolean;
+  /** Inline only: the button opens this menu (same menu as ⋯) instead of
+   *  selecting; `label` names the button and the menu, `attention` tints it
+   *  and `detail` is its tooltip. */
+  submenu?: readonly DockAction[];
 }
 
 /** In-flow dock surfaces (file, diff, Changes) share the dock's expanded
@@ -81,31 +87,39 @@ export function requestPaneDockClose(surface: PaneDockCloseSurface): void {
   window.dispatchEvent(new CustomEvent(PANE_DOCK_CLOSE_EVENT, { detail: { surface } }));
 }
 
-const MENU_EDGE = 8;
-const MENU_GAP = 4;
 const MENU_ITEM_HEIGHT = 28;
 const MENU_ITEM_SEPARATOR = 5;
 const MENU_PADDING = 10;
 
-/** Fixed placement of the portalled ⋯ menu: right-aligned under the button,
- *  flipped above when it does not fit below and above is roomier, capped to
- *  the room on the chosen side. */
+/** Fixed placement of the portalled ⋯ menu: the shared anchored-popup rule
+ *  for a trailing trigger (anchored-panel.ts) — below the button, right edges
+ *  aligned, 6px off, flipping above only when below cannot hold it and above
+ *  is roomier. The menu sizes to its labels; the owner clamps it into the
+ *  window once measured. */
 export function dockMenuPlacement(
-  anchor: { top: number; bottom: number; right: number },
+  anchor: { top: number; bottom: number; left: number; right: number },
   viewport: { width: number; height: number },
-  items: readonly DockAction[]
+  items: readonly DockAction[],
+  bounds = { left: 0, top: 0, right: viewport.width, bottom: viewport.height, ...viewport }
 ): CSSProperties {
   const estimated =
     items.length * MENU_ITEM_HEIGHT +
     items.filter((item) => item.separatorBefore).length * MENU_ITEM_SEPARATOR +
     MENU_PADDING;
-  const below = Math.max(0, viewport.height - anchor.bottom - MENU_GAP - MENU_EDGE);
-  const above = Math.max(0, anchor.top - MENU_GAP - MENU_EDGE);
-  const flip = below < estimated && above > below;
-  const right = Math.max(MENU_EDGE, viewport.width - anchor.right);
-  return flip
-    ? { right, bottom: viewport.height - anchor.top + MENU_GAP, maxHeight: above }
-    : { right, top: anchor.bottom + MENU_GAP, maxHeight: below };
+  // Copied field by field: a DOMRect's edges are prototype getters.
+  const { top, bottom, left, right } = anchor;
+  const trigger = { top, bottom, left, right, width: right - left, height: bottom - top };
+  const geometry = anchoredPanelGeometry({
+    trigger,
+    bounds,
+    preferredWidth: 0,
+    naturalHeight: estimated,
+    align: 'end',
+  });
+  const { transformOrigin: _origin, ...style } = anchoredPanelStyle(geometry, trigger);
+  // Right-pinned, the menu grows leftward: never past the pane's left inset
+  // (useRowMenuClamp lets the CSS min-width yield to this room).
+  return { ...style, maxWidth: Math.max(0, geometry.left + geometry.width - bounds.left - 8) };
 }
 
 /** False once the menu's owner is detached, `hidden`/`inert`, or inside a
@@ -125,12 +139,22 @@ function dockMenuItemRole(item: DockAction): 'menuitem' | 'menuitemradio' | 'men
   return item.checkbox ? 'menuitemcheckbox' : 'menuitemradio';
 }
 
-export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
+export function DockOverflowMenu({
+  items,
+  opener,
+}: {
+  items: readonly DockAction[];
+  /** A dedicated header button (icon, name, tooltip) instead of ⋯. */
+  opener?: Pick<DockAction, 'icon' | 'label' | 'attention'> & { tooltip?: string };
+}) {
+  const TriggerGlyph = opener?.icon ?? MoreHorizontal;
+  const triggerLabel = opener?.label ?? t('More actions');
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<CSSProperties>({});
   const root = useRef<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const menu = useRef<HTMLDivElement | null>(null);
+  useRowMenuClamp(open, menu);
   const place = useCallback(() => {
     const button = trigger.current;
     if (!button) return;
@@ -141,7 +165,8 @@ export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
           width: document.documentElement.clientWidth || window.innerWidth,
           height: document.documentElement.clientHeight || window.innerHeight,
         },
-        items
+        items,
+        paneBounds(button)
       )
     );
   }, [items]);
@@ -228,8 +253,9 @@ export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
         className="browser-pane-nav-button dock-header-more"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={t('More actions')}
-        data-tooltip={t('More actions')}
+        aria-label={triggerLabel}
+        data-attention={opener?.attention ? 'true' : undefined}
+        data-tooltip={opener?.tooltip ?? triggerLabel}
         onClick={() =>
           commitImmediateOverlay(() => {
             if (!open) place();
@@ -237,14 +263,14 @@ export function DockOverflowMenu({ items }: { items: readonly DockAction[] }) {
           })
         }
       >
-        <MoreHorizontal size={15} aria-hidden="true" />
-        {items.some((item) => item.attention || item.badge) ? (
+        <TriggerGlyph size={15} aria-hidden={true} />
+        {!opener && items.some((item) => item.attention || item.badge) ? (
           <span className="dock-header-more-dot" aria-hidden="true" />
         ) : null}
       </button>
       {open &&
         createPortal(
-          <div ref={menu} className="dock-header-menu" role="menu" aria-label={t('More actions')} style={placement}>
+          <div ref={menu} className="dock-header-menu" role="menu" aria-label={triggerLabel} style={placement}>
             {items.map((item) => {
               const Glyph = item.icon;
               let glyph: ReactNode = null;
@@ -335,6 +361,20 @@ export function DockHeaderRow({
         {inline.map((action) => {
           const Glyph = action.icon;
           const badgeText = action.badge && action.badge > 99 ? '99+' : action.badge;
+          if (action.submenu) {
+            return (
+              <DockOverflowMenu
+                key={action.id}
+                items={action.submenu}
+                opener={{
+                  icon: action.icon,
+                  label: action.label,
+                  attention: action.attention,
+                  tooltip: action.detail,
+                }}
+              />
+            );
+          }
           return (
             <button
               key={action.id}

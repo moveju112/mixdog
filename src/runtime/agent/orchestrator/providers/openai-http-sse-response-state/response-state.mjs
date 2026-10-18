@@ -7,11 +7,11 @@
  */
 import { createActiveToolItemTracker } from '../tool-stream-state.mjs';
 import { createToolCallDedupe } from '../lib/leaked-toolcall.mjs';
+import { createRefusals } from '../openai-ws-response-state/refusals.mjs';
 
-export const LABEL = 'OpenAI OAuth HTTP fallback';
-
-export function createResponseState() {
+export function createResponseState(label) {
   return {
+    label,
     content: '',
     model: '',
     responseId: '',
@@ -32,8 +32,12 @@ export function createResponseState() {
     citationKeys: new Set(),
     webSearchCalls: [],
     webSearchCallKeys: new Set(),
+    // Refusal parts (streamed and final), folded into one typed refusal.
+    refusals: createRefusals(),
     completed: false,
     stopReason: null,
+    // Why a max-output cutoff completed the turn (response.incomplete_details).
+    incompleteReason: null,
     // Normalized wire `end_turn` from the terminal frame; undefined unless the
     // server actually supplied a boolean.
     endTurn: undefined,

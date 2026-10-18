@@ -8,8 +8,8 @@ import { traceAgentSse, traceAgentUsage } from '../../agent-trace.mjs';
 import { dedupeToolCallList } from '../lib/leaked-toolcall.mjs';
 import { _displayCodexModel } from '../openai-codex-model.mjs';
 import { createProviderReplay } from '../lib/provider-replay.mjs';
-import { LABEL } from './response-state.mjs';
 import { createResponseStamps } from './response-stamps.mjs';
+import { refusalResultFields } from '../openai-ws-response-state/refusals.mjs';
 
 export function createResponseOutcome({ state }) {
   const { stampToolSafety, stampOutcome, stallPartial, stampStreamError, attachStreamPartial, endedEarlyError } =
@@ -50,7 +50,7 @@ export function createResponseOutcome({ state }) {
       throw stampOutcome(
         stampToolSafety(
           new Error(
-            `${LABEL} function_call salvage failed: missing call_id/name for item_id=${unresolved._pendingItemId || '?'}`
+            `${state.label} function_call salvage failed: missing call_id/name for item_id=${unresolved._pendingItemId || '?'}`
           )
         )
       );
@@ -75,6 +75,7 @@ export function createResponseOutcome({ state }) {
       webSearchCalls: state.webSearchCalls.length ? state.webSearchCalls : undefined,
       usage: state.usage || undefined,
       stopReason: state.stopReason || undefined,
+      incompleteReason: state.incompleteReason || undefined,
       // Only present when the terminal frame carried the wire field.
       ...(typeof state.endTurn === 'boolean' ? { endTurn: state.endTurn } : {}),
       // Text-only max-output cutoff (status:'incomplete'/reason=max_output_tokens
@@ -84,6 +85,8 @@ export function createResponseOutcome({ state }) {
       ...(state.stopReason === 'length' && state.content.length > 0 ? { truncated: true } : {}),
       responseId: state.responseId || undefined,
       serviceTier: state.serviceTier || undefined,
+      // A refused turn: typed stop reason and the refusal text.
+      ...refusalResultFields(state.refusals, state.content),
     };
   };
 

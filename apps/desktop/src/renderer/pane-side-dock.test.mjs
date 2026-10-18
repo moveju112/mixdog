@@ -660,7 +660,8 @@ test('a cold pane dock paints its open shell before mounting the heavy body', as
     assert.ok(panel);
     assert.equal(panel.hidden, false);
     assert.equal(document.querySelector('[data-testid="heavy-dock-body"]'), null);
-    assert.equal(pendingFrames.size, 1);
+    // One frame attaches the body, one activates it (useDockBodyShown).
+    assert.equal(pendingFrames.size, 2);
 
     await act(async () => {
       const callbacks = [...pendingFrames.values()];
@@ -671,6 +672,85 @@ test('a cold pane dock paints its open shell before mounting the heavy body', as
     });
     assert.ok(document.querySelector('[data-testid="heavy-dock-body"]'));
   } finally {
+    await act(async () => root.unmount());
+    restore();
+  }
+});
+
+test('a warm pane dock reopens at its width first and activates its body a frame later', async () => {
+  const { dom, restore } = installTestDom(null, {
+    html: '<!doctype html><html><body><main id="root"></main></body></html>',
+    expose: ['navigator', 'Element', 'HTMLElement', 'Node'],
+  });
+  let nextFrame = 1;
+  const pendingFrames = new Map();
+  dom.window.requestAnimationFrame = (callback) => {
+    const frame = nextFrame++;
+    pendingFrames.set(frame, callback);
+    return frame;
+  };
+  dom.window.cancelAnimationFrame = (frame) => pendingFrames.delete(frame);
+  const runFrames = () =>
+    act(async () => {
+      while (pendingFrames.size) {
+        const callbacks = [...pendingFrames.values()];
+        pendingFrames.clear();
+        for (const callback of callbacks) callback(16);
+      }
+    });
+
+  const { registerTranscriptWidthSync } = await import('./transcript-list-resize-patch.ts');
+  let widthSyncs = 0;
+  const unregister = registerTranscriptWidthSync(() => widthSyncs++);
+  const noop = () => {};
+  const Icon = () => React.createElement('span');
+  const descriptors = new Map([['source-control', { id: 'source-control', label: 'Source Control', icon: Icon }]]);
+  const activity = [];
+  const baseProps = {
+    leafId: 'pane-1',
+    groups: [['source-control']],
+    descriptors,
+    focused: true,
+    onSelect: noop,
+    onClose: noop,
+    onCloseDiff: noop,
+    onMoveGroup: noop,
+    onMoveView: noop,
+    onFocusPane: noop,
+    openFileTab: noop,
+    renderView: (_id, active) => {
+      activity.push(active);
+      return React.createElement('div', { 'data-testid': 'dock-body' }, 'ready');
+    },
+  };
+  const render = (open) =>
+    act(async () => root.render(React.createElement(PaneSideDock, { ...baseProps, entry: { ...closed(), open } })));
+  const root = createRoot(document.getElementById('root'));
+  try {
+    await render(true);
+    await runFrames();
+    await render(false);
+    await runFrames();
+    assert.equal(activity.at(-1), false);
+    const syncsBeforeOpen = widthSyncs;
+    activity.length = 0;
+
+    await render(true);
+    const dock = document.querySelector('.pane-side-dock');
+    assert.equal(dock.dataset.open, 'true', 'the sheet takes its width in the click commit');
+    assert.equal(dock.dataset.bodyPending, 'true');
+    assert.ok(activity.length > 0 && activity.every((active) => active === false), 'the body stays inactive');
+    assert.ok(widthSyncs > syncsBeforeOpen, "the commit that moved the pane's edge re-measured the transcripts");
+
+    await runFrames();
+    assert.equal(dock.dataset.bodyPending, undefined);
+    assert.equal(activity.at(-1), true);
+
+    // A close hides the body in its own commit.
+    await render(false);
+    assert.equal(activity.at(-1), false);
+  } finally {
+    unregister();
     await act(async () => root.unmount());
     restore();
   }
@@ -689,7 +769,11 @@ test('stacked side surfaces are opaque (Mica-proof) and hide the panel body bene
     /\.workbench-side-panel,[^{]*\{[^}]*--mx-workspace-sheet: transparent/
   );
   const layout = await read('./workbench-side-view-layout.tsx');
-  assert.match(layout, /style=\{selected && surfacesActive \? \{ visibility: 'hidden' \} : undefined\}/);
+  // Hidden and skipped: the covered view is neither painted nor laid out.
+  assert.match(
+    layout,
+    /style=\{selected && surfacesActive \? \{ visibility: 'hidden', contentVisibility: 'hidden' \} : undefined\}/
+  );
   assert.match(layout, /inert=\{!selected \|\| surfacesActive \? true : undefined\}/);
 });
 
@@ -894,6 +978,8 @@ test('joined surface: outer radii in every state (panel open|folded x dock open|
   const get = (selector, prop) =>
     block.match(new RegExp(selector.replace(/[.[\]()>:="*+|]/g, '\\$&') + ' \\{[^}]*?' + prop + ': ([^;]+);'))?.[1];
   const R = 'var(--mx-sheet-radius)';
+  const rule = (selector) =>
+    block.match(new RegExp(selector.replace(/[.[\]()>:="*+|]/g, '\\$&') + ' \\{([^}]*)\\}'))?.[1] ?? '';
   const panel = get(':root:not([data-mixdog-mobile-tabs]) .workbench-side-panel[data-side="left"]', 'border-radius');
   const mainOpen = get(':root:not([data-mixdog-mobile-tabs]) .main-panel', 'border-radius');
   const mainFolded = get(
@@ -924,9 +1010,19 @@ test('joined surface: outer radii in every state (panel open|folded x dock open|
     block,
     /border-radius:\s*calc\(var\(--mx-sheet-radius\) \* var\(--no-top\) \* var\(--no-left\) \* var\(--folded\)\)/
   );
+  assert.match(block, /\.app-shell\.sidebar-collapsed \.pane-cell \{\s*--folded: 1;/);
+  // .main-panel paints its rounded frame without clipping (a rounded clip around the transcript
+  // scroller forces main-thread wheel hit tests); each layer reaching an outer corner rounds itself
+  // with the same per-cell flags, at the radius inside the 1px border.
+  assert.match(rule(':root:not([data-mixdog-mobile-tabs]) .main-panel'), /overflow: visible;/);
+  assert.match(block, /--mx-cell-corner: calc\(var\(--mx-sheet-radius\) - 1px\);/);
+  assert.match(
+    rule(':root:not([data-mixdog-mobile-tabs]) .pane-cell > .workspace-tabs-shell'),
+    /border-top-right-radius: calc\(var\(--mx-cell-corner\) \* var\(--no-top\) \* var\(--open-right\)\);/
+  );
   assert.match(
     block,
-    /:has\(\.app-shell\.sidebar-collapsed\):not\(:has\([^{]*\)\) \.main-panel:has\([^{]*\) \.pane-cell \{\s*--folded: 1;/
+    /\.pane-surface-handoff-layer,[^{]*\{\s*border-bottom-right-radius: calc\(var\(--mx-cell-corner\) \* var\(--no-bottom\) \* var\(--open-right\)\);/
   );
   assert.match(block, /\.pane-split-row > \.pane-split-cell:last-child \.pane-cell \{\s*--no-left: 0;/);
   assert.match(block, /\.pane-split-row > \.pane-split-cell:first-child \.pane-cell \{\s*--open-right: 0;/);
@@ -978,7 +1074,10 @@ test('the browser ⋯ menu carries device view, copy link, system browser and cr
   assert.equal(labels.includes('Copy link'), false, 'copy link was removed from ⋯');
   assert.ok(labels.includes('Open in system browser'));
   assert.ok(labels.includes('Fill with stored credentials'));
-  assert.equal(actions.filter((item) => item.checked).length, 1);
+  assert.equal(actions.filter((item) => item.checked && item.id !== 'zoom-bar').length, 1);
+  const zoomBar = actions.find((item) => item.id === 'zoom-bar');
+  assert.equal(zoomBar.label, 'Zoom bar');
+  assert.equal(zoomBar.checkbox, true);
   actions.find((item) => item.id === 'credential-c1').onSelect();
   assert.deepEqual(fills, ['c1']);
   const { readFile } = await import('node:fs/promises');
@@ -1232,7 +1331,9 @@ test('dock header buttons and tab icons match the pane strip toggles, +, and tab
   // Every header control is a 16px lucide mark (open-in-system-browser included).
   const chrome = await read('./pane-dock-chrome.tsx');
   assert.match(chrome, /<Glyph size=\{15\} aria-hidden=\{true\} \/>/);
-  assert.match(chrome, /<MoreHorizontal size=\{15\}/);
+  // The ⋯ trigger (or a dedicated opener such as the visualize versions button) draws at 15px too.
+  assert.match(chrome, /TriggerGlyph = opener\?\.icon \?\? MoreHorizontal/);
+  assert.match(chrome, /<TriggerGlyph size=\{15\}/);
   assert.match(chrome, /<X size=\{15\}/);
   assert.match(await read('./BrowserPane.lazy.tsx'), /icon: ExternalLink/);
 });
@@ -1252,7 +1353,16 @@ test('a pane bottom panel sits inside the workspace sheet and the dock spans the
   // The panel is a flat row under the stack, divided by one hairline (desktop sheet band only).
   const tail = css.slice(css.lastIndexOf('@media (min-width: 941px)'));
   const panel = tail.match(/\.pane-cell > \.bottom-panel:not\(\[data-state="closed"\]\) \{([^}]*)\}/)[1];
-  assert.match(panel, /margin: 0;\s*border: 0;\s*border-top: 1px solid var\(--mx-border\);\s*border-radius: 0;/);
+  assert.match(panel, /margin: 0;\s*border: 0;\s*border-top: 1px solid var\(--mx-border\);/);
+  // Its own bottom corners follow the sheet's outer corners; the stack above it then keeps square ones.
+  assert.match(
+    panel,
+    /border-radius: 0 0 calc\(var\(--mx-cell-corner\) \* var\(--no-bottom\) \* var\(--open-right\)\)/
+  );
+  assert.match(
+    tail,
+    /\.pane-cell:has\(> \.bottom-panel:not\(\[data-state="closed"\]\)\)\s*>\s*\.pane-surface-stack \{\s*--no-bottom: 0;/
+  );
   assert.match(panel, /background: var\(--mx-sheet-surface\);/);
   assert.match(tail, /:root:not\(\[data-mixdog-mobile-tabs\]\)/);
   // Every pane cell (split panes included) gets its own panel row: PaneWorkspace renders

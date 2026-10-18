@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.net.Uri;
+import android.provider.Settings;
 import android.webkit.WebView;
 import androidx.webkit.JavaScriptReplyProxy;
 import androidx.webkit.WebMessageCompat;
@@ -54,6 +55,26 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
   void onResume() {
     updater.onResume();
     fileSave.onResume();
+    // The notification permission may have changed in system settings.
+    fireEvent();
+  }
+
+  /** This app's notification settings; the app's details page when the device has none. */
+  private boolean openNotificationSettings() {
+    Intent settings =
+        new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, activity.getPackageName());
+    Intent details =
+        new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + activity.getPackageName()));
+    for (Intent intent : new Intent[] {settings, details}) {
+      try {
+        activity.startActivity(intent);
+        return true;
+      } catch (Exception ignored) {
+        // Not available here: try the next one.
+      }
+    }
+    return false;
   }
 
   void onDestroy() {
@@ -99,15 +120,6 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
       WebViewCompat.addDocumentStartJavaScript(webView, SYSTEM_BROWSER_LINK_SCRIPT, Collections.singleton("*"));
     }
     // [FORK:F006] 끝
-    // [FORK:F007] 시작 — 폰 채팅 화면에서 왼쪽→오른쪽 드래그로 세션 서랍 열기
-    // 원본: 세션 서랍은 상단 로고(홈) 버튼으로만 열림 (relay 웹앱 WorkspaceTabStrip 의 mixdog:mobile-home 이벤트)
-    // 포크: 서랍이 닫힌 상태에서 오른쪽으로 60px 이상 가로 드래그하면 같은 mixdog:mobile-home 이벤트를 보냄
-    // 이유: 한 손으로 세션 목록을 빠르게 열기 위함, PC 앱 포크 없이 폰 앱에서만 바꾸기 위함
-    // 원본 동일 수정 시: 원본 채택 — 원본이 스와이프 열기를 제공하면 이 블록 제거, 이벤트명·서랍 DOM 이 바뀌면 새 구조로 다시 적용
-    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-      WebViewCompat.addDocumentStartJavaScript(webView, DRAWER_SWIPE_SCRIPT, Collections.singleton("*"));
-    }
-    // [FORK:F007] 끝
   }
 
   // [FORK:F006] 시작 — 링크 가로채기 스크립트 (relay 웹앱 폰 화면 html[data-mixdog-mobile-tabs] 에서만 동작)
@@ -127,34 +139,6 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
           + "host.postMessage(JSON.stringify({id:-1,method:'openExternalUrl',args:{url:u.href}}));"
           + "},true);})();";
   // [FORK:F006] 끝
-
-  // [FORK:F007] 시작 — 서랍 스와이프 스크립트 (relay 웹앱 폰 화면 html[data-mixdog-mobile-tabs] 에서만 동작)
-  // 원본: 없음
-  // 포크: passive 터치 리스너로 스크롤을 막지 않음; 서랍 닫힘(.sidebar-drawer-frame[data-state=closed])일 때만,
-  //       입력창·터미널·대화상자·가로 스크롤 영역·글자 선택 중에는 무시; 가로 60px 이상이고 세로의 2배 이상일 때 1회 발동
-  // 이유: 위 register() 의 F007 블록과 동일
-  // 원본 동일 수정 시: 원본 채택 — 위 F007 블록과 함께 판단
-  private static final String DRAWER_SWIPE_SCRIPT =
-      "(function(){var sx=0,sy=0,on=false;"
-          + "function skip(t){for(var n=t;n&&n.nodeType===1;n=n.parentElement){"
-          + "if(n.matches('input,textarea,select,[contenteditable]:not([contenteditable=\"false\"]),.xterm,[role=\"dialog\"]'))return true;"
-          + "if(n.scrollWidth>n.clientWidth+1){var o=getComputedStyle(n).overflowX;if(o==='auto'||o==='scroll')return true;}}"
-          + "return false;}"
-          + "document.addEventListener('touchstart',function(e){on=false;"
-          + "if(e.touches.length!==1||!document.documentElement.hasAttribute('data-mixdog-mobile-tabs'))return;"
-          + "var f=document.querySelector('.sidebar-drawer-frame');if(!f||f.getAttribute('data-state')!=='closed')return;"
-          + "var s=window.getSelection&&window.getSelection();if(s&&!s.isCollapsed)return;"
-          + "if(skip(e.target))return;"
-          + "sx=e.touches[0].clientX;sy=e.touches[0].clientY;on=true;},{capture:true,passive:true});"
-          + "document.addEventListener('touchmove',function(e){if(!on)return;"
-          + "if(e.touches.length!==1){on=false;return;}"
-          + "var dx=e.touches[0].clientX-sx,dy=Math.abs(e.touches[0].clientY-sy);"
-          + "if(dx>=60&&dx>dy*2){on=false;window.dispatchEvent(new Event('mixdog:mobile-home'));return;}"
-          + "if(dy>24&&dy*2>=dx)on=false;},{capture:true,passive:true});"
-          + "function end(){on=false;}"
-          + "document.addEventListener('touchend',end,{capture:true,passive:true});"
-          + "document.addEventListener('touchcancel',end,{capture:true,passive:true});})();";
-  // [FORK:F007] 끝
 
   // [FORK:F003] 시작 — 서랍 폭 덮어쓰기 스타일 (html[data-mixdog-mobile-tabs] 는 relay 웹앱의 폰 화면에만 존재)
   // 원본: 없음
@@ -287,6 +271,8 @@ public final class MixdogNativeHost implements WebViewCompat.WebMessageListener 
             }
           }
           return state().toString();
+        case "openNotificationSettings":
+          return openNotificationSettings() ? "true" : "false";
         case "peekPendingActions":
           return MixdogPushStore.peekActions(activity, args.optString("hostId", "")).toString();
         case "ackPendingAction":

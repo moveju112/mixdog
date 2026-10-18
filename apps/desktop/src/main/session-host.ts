@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { canonicalPath } from '../../../../src/runtime/shared/worktrees/paths.mjs';
 
 import type {
   DesktopAbortOptions,
@@ -29,8 +30,9 @@ import {
   isPermanentAttachmentError,
   readAttachmentBuffer,
 } from '../../../../src/runtime/attachments/store.mjs';
+import { isActiveDesktopAgentEntry } from '../shared/agent-activity';
 import { desktopSessionSummaries } from './desktop-state';
-import { sessionFinalAnswer, type SessionFinalAnswer } from './session-final-answer';
+import { sessionFinalAnswer, withSessionMissingCode, type SessionFinalAnswer } from './session-final-answer';
 import type { DesktopService, SerializableDesktopServiceOptions } from './desktop-service-contract';
 import { mixdogDataDirectory } from './computer/shared/common';
 import { SessionHostCatalog, catalogRelevantStoreEntry } from './session-host-catalog';
@@ -117,6 +119,7 @@ export class SessionHost implements DesktopService {
   private engineClientHostPid = 0;
   private rawSessionRows: Array<Record<string, unknown>> = [];
   private sessionCatalogLoaded = false;
+  private publishedAgentRows: DesktopAgentPoolRow[] = [];
   private sessionCatalogPromise: Promise<DesktopSessionSummary[]> | null = null;
   private agentPoolRowsPromise: Promise<DesktopAgentPoolRow[]> | null = null;
   private disposed = false;
@@ -136,10 +139,11 @@ export class SessionHost implements DesktopService {
       controlSessionId: () => this.transport.controlSessionId,
       setControlSessionId: (sessionId) => this.transport.setControlSessionId(sessionId),
       visibleSessionIds: () => this.visibleSessionIds,
-      readSession: (sessionId) => this.transport.readSession(sessionId),
+      readSession: (sessionId, forceFull) => this.transport.readSession(sessionId, forceFull),
       snapshotWithShellJobs: (sessionId, snapshot) => this.snapshotWithShellJobs(sessionId, snapshot),
       trackShellJobsEngineState: (snapshot) => this.trackShellJobsEngineState(snapshot),
       onShellPublished: () => this.shellJobsPoller.onEngineEvent(),
+      clearSessionActivity: () => this.clearSessionActivity(),
     });
     this.transport = new SessionHostTransport(sessionClient, {
       isDisposed: () => this.disposed,
@@ -168,7 +172,7 @@ export class SessionHost implements DesktopService {
         listSessions: () => this.listSessions(),
         listAgentPool: () => this.listAgentPool(),
         publishSessions: (sessions) => this.publishSessionCatalog(sessions),
-        publishAgents: (agents) => this.publication.publishAgents(agents),
+        publishAgents: (agents) => this.publishAgentPool(agents),
         coldSessionIds: () =>
           [...this.visibleSessionIds].filter((sessionId) => Boolean(this.publication.projections.get(sessionId)?.cold)),
         readSession: (sessionId) => this.readSession(sessionId),
@@ -184,7 +188,7 @@ export class SessionHost implements DesktopService {
     this.shellJobsPoller = createShellJobsPoller({
       getEngineState: () => this.shellJobsEngineState(),
       loadModule: runtime.loadStatuslineSegments,
-      onChange: (sessionIds) => this.publishShellJobChanges(sessionIds),
+      onChange: (sessionIds, everySession) => this.publishShellJobChanges(sessionIds, everySession),
     });
     this.taskWorkspacePath = join(options.userDataPath, 'workspace', 'unclassified');
     this.projects = new DesktopProjectRegistry({
@@ -221,6 +225,7 @@ export class SessionHost implements DesktopService {
         }
       },
       resolveSessionWorkspace: (path) => this.resolveSessionWorkspace(path),
+      sessionProjectPath: (session) => this.projects.sessionProjectPath(session),
       projectDirectory: (path) => this.projectDirectory(path),
       openHints: (sessionId) => this.openHints(sessionId),
       readSession: (sessionId, forceFull, publish, readTraceId, page) =>
@@ -244,6 +249,42 @@ export class SessionHost implements DesktopService {
     });
   }
 
+  /** The cached rows' `working` / `agentWorking` come from the daemon's
+   *  in-memory run state and die with its connection: strip them and republish
+   *  so the sidebar stops spinning. The next listing restores whatever the
+   *  daemon reports again. */
+  private clearSessionActivity(): void {
+    this.settlePublishedAgentPool();
+    let changed = false;
+    this.rawSessionRows = this.rawSessionRows.map((row) => {
+      if (!('working' in row) && !('agentWorking' in row)) return row;
+      changed = true;
+      const { working: _working, agentWorking: _agentWorking, ...settled } = row;
+      return settled;
+    });
+    if (changed) this.publishSessionCatalog(this.sessionCatalog());
+  }
+
+  private publishAgentPool(agents: DesktopAgentPoolRow[]): void {
+    this.publishedAgentRows = agents;
+    this.publication.publishAgents(agents);
+  }
+
+  /** Pool rows read `running` only from the daemon's report. With the daemon
+   *  gone, a still-active published row reads `unknown` (as the daemon itself
+   *  projects a declared-working row it does not run) until its next report. */
+  private settlePublishedAgentPool(): void {
+    let changed = false;
+    const settled = this.publishedAgentRows.map((row) => {
+      if (!isActiveDesktopAgentEntry(row)) return row;
+      changed = true;
+      const { awaitingUser: _awaitingUser, ...rest } = row as DesktopAgentPoolRow & { awaitingUser?: unknown };
+      return { ...rest, status: 'unknown', stage: 'unknown', turnStartedAt: null } as DesktopAgentPoolRow;
+    });
+    if (!changed) return;
+    this.publishAgentPool(settled);
+  }
+
   static async create(options: SerializableDesktopServiceOptions, runtime: SessionHostRuntime): Promise<SessionHost> {
     let host: SessionHost | null = null;
     const sessionClient = await runtime.attachSessionClient({
@@ -256,6 +297,8 @@ export class SessionHost implements DesktopService {
     });
     host = new SessionHost(options, runtime, sessionClient);
     host.shellJobsPoller.start();
+    // Secure the receipts folder now, off the first submission's path.
+    void host.newTaskRequests.prepare();
     return host;
   }
 
@@ -289,7 +332,7 @@ export class SessionHost implements DesktopService {
   private shellJobsEngineState(): Record<string, unknown> | null {
     const base = (this.engineSnapshot ?? this.publication.shellSnapshot) as Record<string, unknown> | null;
     if (!base || typeof base !== 'object') return null;
-    if (Number(base.ownerClientHostPid || base.clientHostPid) > 0) return base;
+    if (Number(base.clientHostPid) > 0) return base;
     return this.engineClientHostPid > 0 ? { ...base, clientHostPid: this.engineClientHostPid } : base;
   }
 
@@ -298,11 +341,10 @@ export class SessionHost implements DesktopService {
   private trackShellJobsEngineState(snapshot: SessionSnapshot): void {
     if (!snapshot || typeof snapshot !== 'object') return;
     const state = snapshot as Record<string, unknown>;
-    const pid = Number(state.ownerClientHostPid || state.clientHostPid) || 0;
+    const pid = Number(state.clientHostPid) || 0;
     if (pid > 0) this.engineClientHostPid = pid;
     // The poller needs ownership and activity, never the full transcript.
     this.engineSnapshot = {
-      ownerClientHostPid: state.ownerClientHostPid,
       clientHostPid: state.clientHostPid,
       busy: snapshot.busy,
       commandBusy: snapshot.commandBusy,
@@ -312,7 +354,7 @@ export class SessionHost implements DesktopService {
 
   private snapshotWithShellJobs(sessionId: string, snapshot: SessionSnapshot): SessionSnapshot {
     if (!snapshot || typeof snapshot !== 'object') return snapshot;
-    const shellJobs = this.shellJobsPoller.statusFor(sessionId);
+    const shellJobs = this.shellJobsPoller.statusFor(sessionId, this.sessionCwd(sessionId));
     const hostShellJobs = this.shellJobsPoller.status;
     return {
       ...snapshot,
@@ -321,8 +363,9 @@ export class SessionHost implements DesktopService {
     };
   }
 
-  private publishShellJobChanges(sessionIds: readonly string[]): void {
-    for (const sessionId of sessionIds) {
+  private publishShellJobChanges(sessionIds: readonly string[], everySession = false): void {
+    const targets = everySession ? new Set([...sessionIds, ...this.publication.projections.keys()]) : sessionIds;
+    for (const sessionId of targets) {
       const projection = this.publication.projections.get(sessionId);
       if (projection) this.publishSession(sessionId, projection.snapshot);
     }
@@ -398,13 +441,21 @@ export class SessionHost implements DesktopService {
     return canonical;
   }
 
-  private openHints(sessionId: string): Record<string, unknown> {
+  private sessionRow(sessionId: string) {
     const row = this.rawSessionRows.find((entry) => String(entry.id || '') === sessionId);
     const workspace =
       row?.workspace && typeof row.workspace === 'object' ? (row.workspace as Record<string, unknown>) : null;
     // The execution root may be a managed worktree; the project identity is
     // always the registered main Project.
-    const cwd = String(workspace?.cwd || row?.cwd || '');
+    return { row, workspace, cwd: String(workspace?.cwd || row?.cwd || '') };
+  }
+
+  private sessionCwd(sessionId: string): string {
+    return this.sessionRow(sessionId).cwd;
+  }
+
+  private openHints(sessionId: string): Record<string, unknown> {
+    const { row, workspace, cwd } = this.sessionRow(sessionId);
     const stored =
       row?.desktopSession && typeof row.desktopSession === 'object'
         ? (row.desktopSession as Record<string, unknown>)
@@ -424,9 +475,10 @@ export class SessionHost implements DesktopService {
     forceFull = false,
     publish = true,
     readTraceId?: string,
-    page = false
+    page = false,
+    signal?: AbortSignal
   ): Promise<SessionSnapshot> {
-    return this.transport.readSession(sessionId, forceFull, publish, readTraceId, page);
+    return this.transport.readSession(sessionId, forceFull, publish, readTraceId, page, signal);
   }
 
   async readAttachmentImage(attachmentRef: string): Promise<string | null> {
@@ -439,9 +491,17 @@ export class SessionHost implements DesktopService {
     }
   }
 
-  async readSessionFinalAnswer(sessionId: string, startedAt: number): Promise<SessionFinalAnswer | null> {
+  async readSessionFinalAnswer(
+    sessionId: string,
+    startedAt: number,
+    signal?: AbortSignal
+  ): Promise<SessionFinalAnswer | null> {
     // Read this session without selecting it or publishing a pane snapshot.
-    return sessionFinalAnswer(await this.readSession(sessionId, false, false), startedAt);
+    try {
+      return sessionFinalAnswer(await this.readSession(sessionId, false, false, undefined, false, signal), startedAt);
+    } catch (error) {
+      throw withSessionMissingCode(error);
+    }
   }
 
   async readSessionTranscript(sessionId: string): Promise<SessionSnapshot> {
@@ -470,6 +530,43 @@ export class SessionHost implements DesktopService {
     await this.projects.register(await this.canonicalDirectory(projectPath));
   }
 
+  async projectRecoveryDirectory(projectPath: string): Promise<string> {
+    try {
+      const known = await this.projects.knownPath(projectPath);
+      try {
+        return await this.canonicalDirectory(known);
+      } catch (cause) {
+        // Live projects must use the same canonical journal key as edits.
+        // Missing registered roots still allow inspection of retained backups.
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return resolve(known);
+        throw cause;
+      }
+    } catch (error) {
+      if (!isAbsolute(projectPath) || !this.runtime.loadWorktrees) throw error;
+      const worktrees = await this.runtime.loadWorktrees();
+      const requested = resolve(projectPath);
+      const entry = await (worktrees.findWorktreeContaining ?? worktrees.getWorktreeByPath)(requested);
+      if (!entry || !['ready', 'deleting', 'recovery'].includes(entry.state ?? 'ready')) throw error;
+      await this.projects.knownPath(entry.projectPath);
+      const key = (path: string) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
+      const within = (base: string, path: string) => key(path) === key(base) || key(path).startsWith(key(base) + sep);
+      // Resolve parent aliases/Windows short names even after the checkout is
+      // gone. Do not resolve the checkout itself: it may be a replacement link.
+      const stableRoot = join(canonicalPath(dirname(entry.path)), basename(entry.path));
+      const spelling = [resolve(entry.path), stableRoot].find((base) => within(base, requested));
+      if (!spelling) throw error;
+      const target = join(stableRoot, relative(spelling, requested));
+      let canonical: string;
+      try {
+        canonical = await realpath(target);
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return target;
+        throw cause;
+      }
+      return within(stableRoot, canonical) ? canonical : target;
+    }
+  }
+
   async projectDirectory(projectPath: string): Promise<string> {
     const { projectPath: known, worktree } = await this.projectScope(projectPath);
     return worktree?.path ?? this.canonicalDirectory(known);
@@ -481,7 +578,6 @@ export class SessionHost implements DesktopService {
 
   async removeProject(projectPath: string): Promise<void> {
     await this.projects.remove(projectPath);
-    if (await this.sessionMetadata.clearProjectAssignments(projectPath)) await this.catalog.publishCatalogs();
   }
 
   async listProjectDir(projectPath: string, relDir: string): Promise<unknown> {
@@ -625,6 +721,10 @@ export class SessionHost implements DesktopService {
     return this.lifecycle.stopShellJob(sessionId, taskId);
   }
 
+  async releaseShellJob(sessionId: string, taskId: string): Promise<{ released: boolean; error?: string }> {
+    return this.lifecycle.releaseShellJob(sessionId, taskId);
+  }
+
   async getQuotaAutoResume(): Promise<boolean> {
     return this.lifecycle.getQuotaAutoResume();
   }
@@ -637,7 +737,7 @@ export class SessionHost implements DesktopService {
     return this.lifecycle.setSessionFavorite(sessionId, favorite);
   }
 
-  async setSessionProject(sessionId: string, projectPath: string | null): Promise<void> {
+  async setSessionProject(sessionId: string, projectPath: string): Promise<void> {
     return this.lifecycle.setSessionProject(sessionId, projectPath);
   }
 
@@ -756,11 +856,9 @@ export class SessionHost implements DesktopService {
 
   private sessionCatalog(): DesktopSessionSummary[] {
     return this.sessionMetadata.withReadCursors(
-      this.sessionMetadata.withProjectAssignments(
-        this.sessionMetadata.withFavoriteFlags(
-          this.sessionMetadata.withArchiveFlags(
-            desktopSessionSummaries(this.rawSessionRows, this.sessionMetadata.titles, this.sessionMetadata.names)
-          )
+      this.sessionMetadata.withFavoriteFlags(
+        this.sessionMetadata.withArchiveFlags(
+          desktopSessionSummaries(this.rawSessionRows, this.sessionMetadata.titles, this.sessionMetadata.names)
         )
       )
     );
@@ -788,7 +886,9 @@ export class SessionHost implements DesktopService {
       } finally {
         try {
           await this.sessionClient.close('service host disposed');
-        } catch {}
+        } catch {
+          // Best-effort close: disposal continues regardless.
+        }
         this.publication.clearProjections();
         this.visibleSessionIds.clear();
         this.visibleSessionSources.clear();

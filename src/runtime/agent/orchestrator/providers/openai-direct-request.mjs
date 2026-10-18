@@ -1,33 +1,44 @@
-import { getModelMetadataSync } from '../../../shared/llm/model-catalog.mjs';
+import {
+  openAiCatalogMeta,
+  openAiSupportsExtendedRetention,
+  openAiUsesPromptCacheOptions,
+} from './openai-model-capabilities.mjs';
 
-// Public Responses contracts are independent of the OAuth backend.
-// Match documented model IDs and dated snapshots, not unknown future families.
-// GPT-5.6 and later: prompt_cache_options caching and Fast mode.
-const GPT_56_PLUS_MODELS =
+// Public Responses contracts are independent of the OAuth backend. Service
+// tiers come from the model catalog (the service-tier price columns), so a
+// model the catalog lists works without an edit. Only a model no catalog
+// describes (cold install) falls back to the documented ids known before the
+// catalogs carried these columns.
+const PRE_CATALOG_GPT_56_PLUS =
   /^(?:gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol|gpt-5\.6-(?:sol|terra|luna))(?:-\d{4}-\d{2}-\d{2})?$/;
-
-// OpenAI bills prompt-cache writes from GPT-5.6 on, and exactly those models
-// take prompt_cache_options and Fast mode. The id pattern is the offline
-// floor; a published cache-write price admits a later model without an edit
-// here, and a family no catalog lists yet stays out.
-// https://developers.openai.com/api/docs/guides/prompt-caching
-function isGpt56PlusModel(model) {
-  const id = String(model || '').trim();
-  if (!id) return false;
-  return GPT_56_PLUS_MODELS.test(id) || getModelMetadataSync(id, 'openai')?.cacheWriteCostPerM > 0;
-}
-// Earlier models documented for Priority processing (now Fast mode).
-const EARLIER_FAST_MODELS = /^gpt-5\.(?:5|4|4-mini)(?:-\d{4}|$)/;
+const PRE_CATALOG_EARLIER_FAST = /^gpt-5\.(?:5|4|4-mini)(?:-\d{4}|$)/;
+const PRE_CATALOG_ULTRAFAST = /^(?:gpt-6-astra|gpt-6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/;
+const modelId = (model) => String(model?.id || model || '').trim();
 
 export function openAiDirectSupportsFast(model) {
-  const id = String(model?.id || model || '').trim();
-  return isGpt56PlusModel(id) || EARLIER_FAST_MODELS.test(id);
+  const meta = openAiCatalogMeta(model);
+  // The catalog's declaration (true or false) decides; a published Priority
+  // rate is the same declaration. A row silent on Fast keeps the documented ids.
+  if (typeof meta?.supportsFastMode === 'boolean') return meta.supportsFastMode;
+  if (meta?.fastPricing) return true;
+  const id = modelId(model);
+  return PRE_CATALOG_GPT_56_PLUS.test(id) || PRE_CATALOG_EARLIER_FAST.test(id);
 }
 
-const ULTRAFAST_MODELS = /^(?:gpt-6-astra|gpt-6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/;
-
+// A published Ultrafast rate (the `_ultrafast` price columns) is the tier's
+// declaration; a row silent on it keeps the documented ids.
 export function openAiDirectSupportsUltrafast(model) {
-  return ULTRAFAST_MODELS.test(String(model?.id || model || '').trim());
+  if (openAiCatalogMeta(model)?.ultrafastPricing) return true;
+  return PRE_CATALOG_ULTRAFAST.test(modelId(model));
+}
+
+// https://developers.openai.com/api/docs/guides/prompt-caching
+// GPT-5.6 and later: prompt_cache_options.ttl. Earlier models: 24h
+// prompt_cache_retention only on the documented extended-retention list;
+// every other model gets no lifetime field (never inferred from pricing).
+function promptCacheForm(model) {
+  if (openAiUsesPromptCacheOptions(model) || PRE_CATALOG_GPT_56_PLUS.test(modelId(model))) return 'options';
+  return openAiSupportsExtendedRetention(model) ? 'retention' : null;
 }
 
 export function applyOpenAIDirectCachePolicy(body, model, storeResponses) {
@@ -37,10 +48,8 @@ export function applyOpenAIDirectCachePolicy(body, model, storeResponses) {
   // Preserve the existing opt-out: no explicit cache-retention hint when
   // response storage is disabled. The provider's default cache still applies.
   if (!storeResponses) return body;
-  if (isGpt56PlusModel(model)) {
-    body.prompt_cache_options = { ttl: '30m' };
-  } else {
-    body.prompt_cache_retention = '24h';
-  }
+  const form = promptCacheForm(model);
+  if (form === 'options') body.prompt_cache_options = { ttl: '30m' };
+  else if (form === 'retention') body.prompt_cache_retention = '24h';
   return body;
 }

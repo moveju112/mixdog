@@ -68,7 +68,7 @@ export const SETUP_OPEN_TARGETS = Object.freeze([
 // Runtime dispatch contract. A trailing ? denotes an optional field. Keep
 // this out of the wire schema: field descriptions already name their actions.
 export const SETUP_ACTION_FIELDS = Object.freeze({
-  status: 'domain?',
+  status: 'domain? detail?',
   open: 'target',
   set_route: 'route',
   set_agent_route: 'agent route',
@@ -136,6 +136,10 @@ const ROUTE_SCHEMA = {
     model: { type: 'string' },
     effort: { type: 'string' },
     fast: { type: 'boolean' },
+    autoEffort: {
+      type: 'boolean',
+      description: 'Main and agent routes only: Auto reasoning for this route; omitted = preserved.',
+    },
     modelParameters: { type: 'object', additionalProperties: { type: 'string' } },
     // A typed enum is unrepresentable on Gemini; the bounds project everywhere
     // and the executor rejects values that are not a multiple of 10.
@@ -152,12 +156,23 @@ const ROUTE_SCHEMA = {
   },
 };
 
+ROUTE_SCHEMA.properties.fallbacks = {
+  type: 'array',
+  description: 'Agent and Web Search routes only: ordered fallback models; [] clears the list.',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['provider', 'model'],
+    properties: Object.fromEntries(Object.entries(ROUTE_SCHEMA.properties).filter(([key]) => key !== 'disabled')),
+  },
+};
+
 export const SETUP_TOOL_DEFS = Object.freeze([
   {
     name: 'setup',
     title: 'Setup',
     description:
-      "Read or change this Mixdog installation's settings through the runtime. Load the setup skill first (local-provider for managed local-model installation). status reads one domain; open navigates the attached app to a settings surface. Secrets (API keys, OAuth) are never accepted. Changes apply to new sessions unless the result says otherwise.",
+      "Read or change this Mixdog installation's settings through the runtime. Load the setup skill first (local-provider for managed local-model installation). status reads one domain; open navigates the attached app to a settings surface; list_models returns a provider index, then one provider's paged compact rows, then one model's full options (catalog.model). Results are compact JSON. Secrets (API keys, OAuth) are never accepted. Changes apply to new sessions unless the result says otherwise.",
     annotations: {
       title: 'Setup',
       readOnlyHint: false,
@@ -176,6 +191,11 @@ export const SETUP_TOOL_DEFS = Object.freeze([
           type: 'string',
           enum: [...SETUP_STATUS_DOMAINS],
           description: 'status: which domain to read; default summary.',
+        },
+        detail: {
+          type: 'boolean',
+          description:
+            'status providers: full rows for every provider (key URLs, expiry, account ids) instead of configured providers only.',
         },
         target: {
           type: 'string',
@@ -236,7 +256,7 @@ export const SETUP_TOOL_DEFS = Object.freeze([
         accountId: {
           type: 'string',
           description:
-            'forget_provider_auth: OAuth account id from status providers; required when the provider has several accounts.',
+            'forget_provider_auth: OAuth account id from status providers with detail:true; required when the provider has several accounts.',
         },
         providerAccount: {
           type: 'object',
@@ -263,7 +283,8 @@ export const SETUP_TOOL_DEFS = Object.freeze([
               properties: { id: { type: 'string' }, label: { type: 'string', maxLength: 80 } },
             },
           },
-          description: 'set_provider_account: OAuth account change; account ids from status providers.',
+          description:
+            'set_provider_account: OAuth account change; account ids from status providers with detail:true.',
         },
         modelId: {
           type: 'string',

@@ -8,11 +8,12 @@ import { truncatedCompatStreamError } from '../lib/openai-tool-args.mjs';
 import {
   emitCompatToolCallOnce,
   firstByteCompatStreamError,
+  failingFinishReasonError,
   markErrorLiveTextEmitted,
   markUnsafeRetryIfToolEmitted,
 } from '../openai-compat-stream-common.mjs';
 import { orderedToolCalls, toolCallsFromStreamAcc } from './tool-call-acc.mjs';
-import { attachPartial, attachReportedUsage, stampCompatOutcome } from './stream-state.mjs';
+import { attachPartial, attachReportedUsage, isIncompleteFinishReason, stampCompatOutcome } from './stream-state.mjs';
 
 /** Rejection for a stream that ended without a terminal event. */
 export function incompleteStreamError(state, label) {
@@ -61,10 +62,33 @@ function parseAccumulatedToolCalls(state, { label, parseToolCalls }) {
   }
 }
 
+// A gateway-reported failing finish_reason (`network_error`, `error`) is an
+// interruption: the stream carries no terminal, so exposure keeps its replay
+// gates.
+function finishReasonInterruption(state, err) {
+  attachPartial(state, err);
+  if (state.emittedText) {
+    markErrorLiveTextEmitted(err);
+    try {
+      err.streamStalled = true;
+    } catch {
+      /* best-effort */
+    }
+  }
+  return stampCompatOutcome(state, markUnsafeRetryIfToolEmitted(err, state.streamEmitState), {
+    terminalObserved: false,
+    continuation: true,
+  });
+}
+
 export function settleCompatStream(state, { label, parseToolCalls }) {
+  const failing = failingFinishReasonError(state.stopReason, label);
+  if (failing) throw finishReasonInterruption(state, failing);
   const response = buildResponse(state);
   let toolCalls = parseAccumulatedToolCalls(state, { label, parseToolCalls });
-  if (Array.isArray(toolCalls) && toolCalls.length) {
+  // A length-truncated or content-filtered call is a partial result that
+  // normalizeCompatChatResponse rejects: it must never reach the executor.
+  if (!isIncompleteFinishReason(state.stopReason) && Array.isArray(toolCalls) && toolCalls.length) {
     for (const call of toolCalls) emitCompatToolCallOnce(state.streamEmitState, call, state.onToolCall);
   }
   if (state.leakedCalls.length) {
@@ -77,6 +101,7 @@ export function settleCompatStream(state, { label, parseToolCalls }) {
     toolCalls,
     stopReason: state.stopReason,
     reasoningContent: state.sawReasoningContent ? state.reasoningContent : null,
+    reasoningSource: state.sawReasoningContent ? state.reasoningSource : null,
     reasoningDetails: state.reasoningDetails.length ? state.reasoningDetails : null,
     rawUsage: state.rawUsage,
   };

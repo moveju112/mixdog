@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { compactCount, agentUsageMeta } from './agent-row-meta.ts';
 import { t as translate } from './i18n.ts';
-import { backgroundJobRows, cwdFolderName, shellFinishedLabel, shellRowAction } from './background-jobs-model.ts';
+import {
+  backgroundJobRows,
+  cwdFolderName,
+  expiredShellRows,
+  SHELL_AUTO_DISMISS_MS,
+  shellFinishedLabel,
+  shellRowAction,
+} from './background-jobs-model.ts';
 import {
   dismissedShellJobs,
   dismissShellJobs,
@@ -45,28 +51,6 @@ test('finished shell rows follow running ones, newest finish first, with exit in
   assert.equal(rows[2].exitCode, 0);
 });
 
-test('compact counts and usage meta omit unknown parts', () => {
-  assert.deepEqual([0, 999, 1000, 128_400, 999_960, 1_250_000].map(compactCount), [
-    '0',
-    '999',
-    '1k',
-    '128.4k',
-    '1M',
-    '1.3M',
-  ]);
-  assert.equal(agentUsageMeta(undefined), '');
-  assert.equal(agentUsageMeta({ usage: null, toolCalls: null }), '');
-  assert.equal(
-    agentUsageMeta({ usage: { totalTokens: 128_400 }, toolCalls: null }),
-    translate('{{tokens}} tokens', { tokens: '128.4k' })
-  );
-  assert.equal(
-    agentUsageMeta({ usage: { totalTokens: 41_200 }, toolCalls: 9 }),
-    `${translate('{{tokens}} tokens', { tokens: '41.2k' })} · ${translate('Island: {{count}} tool calls', { count: 9 })}`
-  );
-  assert.equal(agentUsageMeta({ usage: null, toolCalls: 0 }), translate('Island: {{count}} tool calls', { count: 0 }));
-});
-
 test('shell row action follows the stop state; finished rows only dismiss', () => {
   const running = { finished: false };
   assert.equal(shellRowAction(running, undefined), 'stop');
@@ -75,13 +59,37 @@ test('shell row action follows the stop state; finished rows only dismiss', () =
   assert.equal(shellRowAction({ finished: true }, 'stopping'), 'dismiss');
 });
 
-test('finished shell labels: cancelled reads Stopped, then exit code, then Finished', () => {
+test('finished shell labels: exit 0 reads Exited, a stop Stopped, anything else Failed', () => {
+  assert.equal(shellFinishedLabel({ status: 'completed', exitCode: 0 }), translate('Island: Exited'));
   assert.equal(shellFinishedLabel({ status: 'cancelled', exitCode: 1 }), translate('Island: Stopped'));
-  assert.equal(
-    shellFinishedLabel({ status: 'failed', exitCode: 2 }),
-    translate('Island: Exited {{code}}', { code: 2 })
-  );
-  assert.equal(shellFinishedLabel({ status: 'completed', exitCode: null }), translate('Island: Finished'));
+  assert.equal(shellFinishedLabel({ status: 'failed', exitCode: 2 }), translate('Failed'));
+  assert.equal(shellFinishedLabel({ status: 'completed', exitCode: null }), translate('Failed'));
+  assert.equal(shellFinishedLabel({ status: 'failed', exitCode: 0 }), translate('Failed'));
+});
+
+test('only clean exits expire, SHELL_AUTO_DISMISS_MS after they finished (or were first seen)', () => {
+  const row = (key, exitCode, finishedAt, status = 'completed') => ({
+    key,
+    kind: 'shell',
+    label: key,
+    startedAt: 0,
+    finished: true,
+    exitCode,
+    status,
+    finishedAt,
+  });
+  const rows = [
+    { key: 'run', kind: 'shell', label: 'run', startedAt: 0 },
+    row('ok-old', 0, 1_000),
+    row('ok-new', 0, 50_000),
+    row('ok-unknown', 0, 0),
+    row('failed', 2, 1_000, 'failed'),
+    row('stopped', null, 1_000, 'cancelled'),
+  ];
+  const seen = () => 30_000;
+  assert.equal(SHELL_AUTO_DISMISS_MS, 60_000);
+  assert.deepEqual(expiredShellRows(rows, 61_000, seen), { keys: ['ok-old'], nextAt: 90_000 });
+  assert.deepEqual(expiredShellRows(rows, 110_000, seen), { keys: ['ok-old', 'ok-new', 'ok-unknown'], nextAt: 0 });
 });
 
 test('cwd folder name takes the last segment of either separator', () => {
@@ -113,4 +121,54 @@ test('dismissed finished rows never come back, and persist per session', () => {
   assert.ok(dismissedShellJobs('sess-x').has('shell:job_2'));
   assert.equal(dismissedShellJobs('sess-y').size, 0);
   delete globalThis.localStorage;
+});
+
+test('a running shell that leaves the running list is kept until its finished record, or a bounded grace', async () => {
+  const { EMPTY_SHELL_ROW_RETENTION, retainVanishedShellRows, SHELL_FINISH_GRACE_MS } = await import(
+    './background-jobs-model.ts'
+  );
+  const running = (id, startedAt) => ({ shellJobs: { count: 1, jobs: [{ taskId: id, command: id, startedAt }] } });
+  const finished = (id, startedAt) => ({
+    shellJobs: {
+      count: 0,
+      jobs: [],
+      finished: [{ taskId: id, command: id, startedAt, status: 'completed', exitCode: 0, finishedAt: 5000 }],
+    },
+  });
+  let retention = EMPTY_SHELL_ROW_RETENTION;
+  const step = (snap, now) => {
+    const out = retainVanishedShellRows(retention, backgroundJobRows(snap), now);
+    retention = out.retention;
+    return out;
+  };
+  step(running('job_32', 1000), 10_000);
+  // The host frame between the two: not running, not yet finished.
+  const gap = step({ shellJobs: { count: 0, jobs: [], finished: [] } }, 10_050);
+  assert.deepEqual(
+    gap.rows.map((row) => [row.key, Boolean(row.finished)]),
+    [['shell:job_32', false]],
+    'never dropped'
+  );
+  assert.equal(gap.expiresAt, 10_050 + SHELL_FINISH_GRACE_MS);
+  const again = step({ shellJobs: { count: 0, jobs: [], finished: [] } }, 10_900);
+  assert.equal(again.rows.length, 1, 'still kept on a repeated frame');
+  assert.equal(again.expiresAt, 10_050 + SHELL_FINISH_GRACE_MS, 'the grace does not restart');
+  const done = step(finished('job_32', 1000), 11_000);
+  assert.deepEqual(
+    done.rows.map((row) => [row.key, Boolean(row.finished)]),
+    [['shell:job_32', true]],
+    'replaced, not duplicated'
+  );
+  assert.equal(done.expiresAt, 0);
+  // A finished record that never comes lapses after the grace.
+  step(running('job_40', 2000), 20_000);
+  step({ shellJobs: { count: 0, jobs: [], finished: [] } }, 20_100);
+  assert.equal(
+    step({ shellJobs: { count: 0, jobs: [], finished: [] } }, 20_100 + SHELL_FINISH_GRACE_MS - 1).rows.length,
+    1
+  );
+  assert.equal(
+    step({ shellJobs: { count: 0, jobs: [], finished: [] } }, 20_100 + SHELL_FINISH_GRACE_MS).rows.length,
+    0
+  );
 });

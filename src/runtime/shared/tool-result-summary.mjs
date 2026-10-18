@@ -640,8 +640,28 @@ function summarizeAgentResult({ text, trimmed, translate }) {
 
 const summarizeGeneric = ({ text, translate }) => summarizeGenericResult(text, translate);
 
+const summarizeAskUserResult = ({ text, translate }) => {
+  // A composer message answered: `User replied in chat: "<json>". ` then the
+  // picks sentence or only the closing one. Summarized as the reply itself.
+  const replied = /^User replied in chat: ("(?:[^"\\]|\\.)*")\. /s.exec(String(text ?? '').trim());
+  if (replied) {
+    let reply = '';
+    try {
+      reply = String(JSON.parse(replied[1]));
+    } catch {}
+    const label = translate('Answered in chat', 'Answered in chat', {});
+    return truncateSingleLine(reply ? `${label}: ${reply}` : label, AGENT_SURFACE_BRIEF_MAX);
+  }
+  const answers =
+    /^User has answered your questions:\s*(.*?)(?:\s*You can now continue with these answers in mind\.)?$/s.exec(
+      String(text ?? '').trim()
+    );
+  return truncateSingleLine(answers ? answers[1] : String(text ?? '').trim(), AGENT_SURFACE_BRIEF_MAX) || null;
+};
+
 const TOOL_RESULT_SUMMARIZERS = new Map(
   [
+    [['ask_user'], summarizeAskUserResult],
     [['read', 'view_image', 'read_mcp_resource'], summarizeReadResult],
     [['apply_patch'], summarizePatchResult],
     [['grep'], summarizeGrepResult],
@@ -662,7 +682,8 @@ const TOOL_RESULT_SUMMARIZERS = new Map(
         'update_memory',
         'request_user_input',
         'update_plan',
-        'cwd',
+        'cwd', // legacy: old transcripts
+        'session',
         'list_mcp_resources',
         'list_mcp_resource_templates',
       ],

@@ -249,9 +249,10 @@ function TurnActionButton({
       className="turn-changes-action"
       disabled={Boolean(blockedReason) || !action.enabled}
       data-tooltip={blockedReason || action.tooltip}
+      aria-label={action.label}
       onClick={() => onMutate(action.capability, null, action.success)}
     >
-      {action.label}
+      <span className="turn-changes-label">{action.label}</span>
       {action.reapply ? <Redo2 size={11} aria-hidden="true" /> : <Undo2 size={11} aria-hidden="true" />}
     </button>
   );
@@ -368,6 +369,8 @@ function useTurnChangesMutation({
     void invokeTurnChanges(capability, [checkpointId, file, revision], sessionId)
       .then((next) => {
         adopt(next);
+        // The worktree moved: every Git surface (Source Control, the Changes chip) re-reads.
+        window.dispatchEvent(new Event('mixdog:git-changed'));
         showDesktopToast(success, 'success');
       })
       .catch((reason: unknown) => {
@@ -445,8 +448,14 @@ function TurnChangesCardBody({
             blockedReason={blockedReason}
             onMutate={mutate}
           />
-          <button type="button" className="turn-changes-view" onClick={(event) => activate(event, null)}>
-            {t('View changes')}
+          <button
+            type="button"
+            className="turn-changes-view"
+            aria-label={t('View changes')}
+            onClick={(event) => activate(event, null)}
+          >
+            <span className="turn-changes-label">{t('View changes')}</span>
+            <ArrowUpRight size={12} aria-hidden="true" />
           </button>
         </span>
       </div>

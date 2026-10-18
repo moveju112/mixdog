@@ -37,6 +37,16 @@ export function createAgentTree({
     watchdogStops.delete(sessionId);
     return error;
   };
+  // Transcripts of running turns captured by a cancel just before it closes
+  // (and clears) the session, so the cancelled turn still reports the output
+  // it produced.
+  const cancelTranscripts = new Map();
+  const rememberCancelTranscript = (sessionId, messages) => cancelTranscripts.set(sessionId, messages);
+  const takeCancelTranscript = (sessionId) => {
+    const messages = cancelTranscripts.get(sessionId) || null;
+    cancelTranscripts.delete(sessionId);
+    return messages;
+  };
   function getSessionProgressSnapshot(sessionId) {
     const runtime = sessionOwner(sessionId)?.runtime;
     if (typeof runtime?.getTurnLiveness !== 'function') return null;
@@ -58,6 +68,7 @@ export function createAgentTree({
     retainUnwatched,
     createSession,
     takeWatchdogStop,
+    takeCancelTranscript,
   });
   const { cancelAgentTree, cancelAgentDescendants } = createAgentCancellation({
     registry,
@@ -65,6 +76,7 @@ export function createAgentTree({
     sessionOwner,
     entryForSession,
     log,
+    rememberCancelTranscript,
   });
 
   /** The descriptor as callers see it: status from the live runtime when one
@@ -97,9 +109,34 @@ export function createAgentTree({
     canRun: (session) => Boolean(registry.get(session?.id)),
     createChild: createAgentChild,
     runTurn: runAgentTurn,
+    /** A model or tuning change for a reused child goes through the session's
+     *  own route API: saved at once, applied from the next turn (never refused
+     *  because a turn is running). `route` may be partial; the route write
+     *  completes it against the latest selected route. The descriptor follows
+     *  the selected route. */
+    async setRoute({ session, route }) {
+      const descriptor = registry.get(session?.id);
+      if (!descriptor || descriptor.closed) throw new Error('agent session is closed');
+      const entry = await entryForSession(descriptor.id, {
+        cwd: descriptor.cwd,
+        provider: descriptor.provider,
+        model: descriptor.model,
+        toolMode: 'full',
+      });
+      try {
+        const applied = await entry.runtime.setRoute({ ...route, sessionOnly: true });
+        descriptor.provider = applied?.provider || route.provider || descriptor.provider;
+        descriptor.model = applied?.model || route.model || descriptor.model;
+        descriptor.updatedAt = Date.now();
+        return applied;
+      } finally {
+        retainUnwatched(entry, 'agent route change');
+      }
+    },
     async enqueueTurn({ session, prompt, context = null }) {
       const descriptor = registry.get(session?.id);
       if (!descriptor || descriptor.closed) throw new Error('agent session is closed');
+      const cancelEpoch = registry.assertAdmission(descriptor.id);
       const runtime = sessionOwner(descriptor.id)?.runtime;
       if (!runtime || !stateBusy(runtime.getState())) return null;
       const accepted = await runtime.submitAsync(String(prompt || ''), {
@@ -110,6 +147,7 @@ export function createAgentTree({
         transcriptMeta: { sender: 'lead' },
       });
       if (accepted === false) throw new Error('agent follow-up was not accepted');
+      registry.assertAdmission(descriptor.id, cancelEpoch);
       return { queueDepth: runtime.getState()?.queued?.length ?? null };
     },
   });
@@ -155,9 +193,9 @@ export function createAgentTree({
       if (handoff) descriptor.lastHandoff = handoff;
       return handoff;
     },
-    async closeSession(sessionId, reason = 'agent session closed') {
+    async closeSession(sessionId, reason = 'agent session closed', options = {}) {
       await rehydrateAgentSessions();
-      return cancelAgentTree(sessionId, reason);
+      return cancelAgentTree(sessionId, reason, options);
     },
     unloadSessionRuntime: (sessionId) => {
       progress.delete(sessionId);

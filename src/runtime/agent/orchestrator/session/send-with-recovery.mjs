@@ -12,6 +12,7 @@ import {
   isRetryableWireErrorEvent,
   isRetryableStreamErrorEvent,
   isProviderRecoveryExhausted,
+  isProviderRecoveryTerminal,
   isServerUnavailable,
   isStreamCut,
   isToolInputCut,
@@ -20,7 +21,9 @@ import {
   resetStallRetryBudget,
   resolveStallRetryBudget,
   retryAfterMsFromError,
+  sleepWithAbort,
 } from '../providers/retry-classifier.mjs';
+import { DETERMINISTIC_KINDS, providerErrorKind } from '../providers/provider-error-kind.mjs';
 import {
   persistsConfirmedImageRejection,
   promptHasInlineImages,
@@ -34,14 +37,14 @@ import {
   isThinkingReplayRejection,
   repairThinkingReplayInPlace,
 } from './thinking-replay-recovery.mjs';
-import { setTimeout as sleepMs } from 'node:timers/promises';
-import { readStreamOutcome } from '../providers/lib/stream-outcome.mjs';
+import { readStreamOutcome, stampStreamOutcome } from '../providers/lib/stream-outcome.mjs';
 import { cloneProviderReplay } from '../providers/lib/provider-replay.mjs';
 import { resolveWorkerCompactPolicy } from './loop/compact-policy.mjs';
 import { agentContextOverflowError } from './loop/context-overflow.mjs';
 import { estimateMessagesTokensSafe } from './loop/compact-debug.mjs';
 import { isOutputLimitStopReason } from './loop/termination.mjs';
 import { instrumentSendCallbacks } from './send-instrumentation.mjs';
+import { rejectedToolSchema } from './tool-schema-rejection.mjs';
 
 function normalizedIncompleteUsage(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -126,10 +129,10 @@ const RECOVERY_RETRY_BACKOFF_MS = retryLadderFromEnv(
   [15_000, 30_000, 60_000, 60_000, 60_000]
 );
 
-// A server-advised wait (Retry-After) replaces the ladder step: a provider that
-// names its own cooldown knows better, within reason — one loop-level wait
-// never parks longer than this.
-const LOOP_RETRY_AFTER_CAP_MS = 120_000;
+// A server-advised wait (Retry-After / retryAfterMs) replaces the ladder step
+// and is honored in full, never shortened. The ladder length
+// still bounds how many replays run, the wait stays cancellable, and the
+// reconnecting stage reports its remaining delay (retryAt).
 
 // Jittering every backoff by 0.9–1.1 means parallel workers that lose the
 // same uplink do not resume in lockstep; our provider layers already jitter
@@ -138,14 +141,42 @@ const TRANSPORT_RETRY_JITTER_RATIO = 0.1;
 
 /** The ladder this failure class is entitled to: an unreachable network, a
  *  provider still unavailable after its own retries, or an ordinary fault. */
-function retryLadderFor(error) {
+function retryLadderFor(error, state = null) {
   if (isConnectFailure(error)) return CONNECTION_RETRY_BACKOFF_MS;
-  if (isProviderRecoveryExhausted(error) && isServerUnavailable(error)) return RECOVERY_RETRY_BACKOFF_MS;
+  if (isProviderRecoveryExhausted(error) && isServerUnavailable(error) && recoveryCyclesEnabled(state)) {
+    return RECOVERY_RETRY_BACKOFF_MS;
+  }
   return TRANSPORT_RETRY_BACKOFF_MS;
 }
 
-function retryBudgetFor(error) {
-  return retryLadderFor(error).length;
+// retryPolicy.recoveryCycles:false — a provider that already ran its own full
+// ladder surfaces its spent failure instead of parking on
+// the 15/30/60/60/60s recovery cycles.
+function recoveryCyclesEnabled(state) {
+  return loopRetryPolicy(state).recoveryCycles !== false;
+}
+
+// Per-provider loop retry policy, read off the provider object
+// (`provider.retryPolicy`), default = the bounded ladders:
+//   unboundedConnectionRetry — a connect failure keeps waiting on the
+//     5/10/20/40/60s… ladder (last step repeating) until the network returns;
+//     still cancellable, with "waiting for network" progress.
+//   contentFilterRetryable   — a content_filter refusal is replayed
+//     under the transport budget with a contextual guidance notice.
+//   inBandInvalidRequestRetryable — an in-band stream error whose only
+//     deterministic evidence is its invalid_request envelope is replayed.
+function loopRetryPolicy(state) {
+  const policy = state?.provider?.retryPolicy;
+  return policy && typeof policy === 'object' ? policy : {};
+}
+
+function waitsForNetwork(error, state) {
+  return loopRetryPolicy(state).unboundedConnectionRetry === true && isConnectFailure(error);
+}
+
+function retryBudgetFor(error, state = null) {
+  if (waitsForNetwork(error, state)) return Number.POSITIVE_INFINITY;
+  return retryLadderFor(error, state).length;
 }
 
 // A provider ladder spent on a connect failure has only shown that the network
@@ -153,15 +184,19 @@ function retryBudgetFor(error) {
 // unavailable parks on the recovery cycles, but only while nothing has reached
 // the user — a replay would otherwise re-show output or re-run a tool. Every
 // other exhausted failure surfaces as-is.
-function providerRecoveryEnded(error, outcome) {
+// A provider VERDICT that recovery is over (an advice-gated denial, the
+// repeated-overload stop) always ends it: the loop never overrides it.
+function providerRecoveryEnded(error, outcome, state = null) {
+  if (isProviderRecoveryTerminal(error)) return true;
   if (!isProviderRecoveryExhausted(error) || isConnectFailure(error)) return false;
+  if (!recoveryCyclesEnabled(state)) return true;
   return !(outcome.replaySafe === true && isServerUnavailable(error));
 }
 
-function transportRetryWaitMs(attemptIndex, error) {
+function transportRetryWaitMs(attemptIndex, error, state = null) {
   const advisedMs = retryAfterMsFromError(error);
-  if (advisedMs != null) return Math.min(advisedMs, LOOP_RETRY_AFTER_CAP_MS);
-  const ladder = retryLadderFor(error);
+  if (advisedMs != null) return advisedMs;
+  const ladder = retryLadderFor(error, state);
   const base = ladder[Math.min(Math.max(attemptIndex, 0), ladder.length - 1)];
   return jitterDelayMs(base, TRANSPORT_RETRY_JITTER_RATIO);
 }
@@ -225,6 +260,7 @@ export async function sendWithRecovery(ctx) {
       hooks.logTurnTiming('ok');
     } catch (sendErr) {
       hooks.logTurnTiming(`err:${sendErr?.code || sendErr?.name || 'unknown'}`);
+      stampStreamOutcome(sendErr, hooks.relayWitness);
       return await recoverFromSendError(sendErr, { ...ctx, relayWitness: hooks.relayWitness });
     }
     return { action: 'proceed', response };
@@ -258,6 +294,46 @@ function traceLoop({ sessionId, nextIteration }, kind, fields) {
 // 5s/15s wait rendered as a frozen turn with no explanation, so the stage
 // change surfaces "Reconnecting... n/max" instead of leaving the user
 // staring at a stalled stream.
+// Unbounded connect-failure wait (retryPolicy.unboundedConnectionRetry): no
+// "n/max" — the turn waits until the network is back, counting down each step.
+function emitWaitingForNetwork(opts, { attempt, waitMs, classifier, error }) {
+  if (typeof opts?.onStageChange !== 'function') return;
+  try {
+    const wait = Math.max(0, Number(waitMs) || 0);
+    opts.onStageChange('reconnecting', {
+      attempt,
+      max: null,
+      waitMs: wait,
+      retryAt: Date.now() + wait,
+      reason: 'waiting for network',
+      waitingForNetwork: true,
+      classifier: classifier || error?.code || null,
+      message: `Reconnecting… waiting for network · attempt ${attempt}${wait > 0 ? ` in ${Math.ceil(wait / 1000)}s` : ''}`,
+    });
+  } catch {
+    /* display-only */
+  }
+}
+
+// content_filter on a path that opted in (retryPolicy.contentFilterRetryable,
+// or the provider boundary stamping `contentFilterRetryable` on the error).
+// A provider-terminal verdict outranks the opt-in.
+function isReplayableContentFilter(sendErr, state) {
+  if (isProviderRecoveryTerminal(sendErr)) return false;
+  const optedIn = loopRetryPolicy(state).contentFilterRetryable === true || sendErr?.contentFilterRetryable === true;
+  return optedIn && providerErrorKind(sendErr).code === 'content_filter';
+}
+
+// The guidance travels as a contextual runtime fragment: the
+// [mixdog-runtime] prefix keeps it out of the visible transcript.
+const CONTENT_FILTER_NOTICE =
+  '[mixdog-runtime] The previous response was stopped by the provider content filter before it completed. ' +
+  'Continue the task, but rephrase or avoid the content that likely triggered the filter; do not repeat it verbatim.';
+
+function contentFilterNotice() {
+  return { role: 'user', content: CONTENT_FILTER_NOTICE, meta: { source: 'content-filter-recovery' } };
+}
+
 function emitLoopReconnectProgress(opts, { attempt, maxAttempts, waitMs, classifier, error }) {
   emitProviderRetryStage(opts?.onStageChange, {
     attempt,
@@ -331,6 +407,7 @@ async function recoverFromSendError(sendErr, state) {
     transportRetriesUsed = 0,
     imageStripUsed = false,
     thinkingReplayRepairUsed = false,
+    toolSchemaDropUsed = false,
     relayWitness,
   } = state;
   const outcome = readStreamOutcome(sendErr, relayWitness);
@@ -353,12 +430,37 @@ async function recoverFromSendError(sendErr, state) {
   }
   // Clean transient transport failure with zero exposure: replay the send
   // after a bounded wait instead of failing the turn.
+  if (isReplayableContentFilter(sendErr, state)) {
+    if (transportRetriesUsed < TRANSPORT_RETRY_MAX && (outcome.replaySafe === true || (await retract()))) {
+      return scheduleTransportReplay(sendErr, state, {
+        budget: TRANSPORT_RETRY_MAX,
+        note: `[loop] content filter stopped the response (${loopTag(state)}); replaying with guidance`,
+        trace: { kind: 'content_filter_retry' },
+        classifier: 'content_filter',
+        notice: contentFilterNotice(),
+      });
+    }
+    throw sendErr;
+  }
   if (
-    transportRetriesUsed < retryBudgetFor(sendErr) &&
-    !providerRecoveryEnded(sendErr, outcome) &&
-    (await transportReplayPermitted(sendErr, outcome, retract))
+    transportRetriesUsed < retryBudgetFor(sendErr, state) &&
+    !providerRecoveryEnded(sendErr, outcome, state) &&
+    (await transportReplayPermitted(sendErr, outcome, retract, state))
   ) {
     return retryTransport(sendErr, state);
+  }
+  // A 400 naming one tool's input schema: the session drops that tool (with
+  // the notice) and the turn is replayed once without it. Nothing was
+  // generated, and the same body would fail every later turn.
+  if (toolSchemaDropUsed !== true) {
+    const exclusion = rejectedToolSchema(sendErr, state);
+    if (exclusion) {
+      logLoop(
+        `[loop] provider rejected tool schema "${exclusion.name}" (${loopTag(state)}); dropping it and replaying once`
+      );
+      traceLoop(state, 'tool_schema_drop', { tool: exclusion.name });
+      return { action: 'retry_tool_schema_drop', exclusion };
+    }
   }
   // Anthropic replay-shape refusal: the latest assistant turn carries
   // thinking blocks the API will not accept back (a thinking run it did not
@@ -373,7 +475,7 @@ async function recoverFromSendError(sendErr, state) {
   ) {
     return repairThinkingReplay(recoveryMessages, state);
   }
-  // Grok Build RetryWithImageStrip: drop inline images and replay once. Safe
+  // Image-strip retry: drop inline images and replay once. Safe
   // only when no tool was dispatched. Text exposure must be retracted first;
   // reasoning-only high-effort streams can retry without a text reset.
   if (
@@ -464,7 +566,7 @@ function isExposedNoToolStall(sendErr, outcome) {
 // 'transient' and never fired).
 async function recoverExposedStall(sendErr, outcome, state, retract) {
   const { transportRetriesUsed = 0 } = state;
-  const exposedRetryBudget = retryBudgetFor(sendErr);
+  const exposedRetryBudget = retryBudgetFor(sendErr, state);
   const len = sendErr.partialContent.length;
   if (transportRetriesUsed < exposedRetryBudget && !isProviderRecoveryExhausted(sendErr) && (await retract())) {
     return scheduleTransportReplay(sendErr, state, {
@@ -491,12 +593,17 @@ async function recoverExposedStall(sendErr, outcome, state, retract) {
 async function scheduleTransportReplay(sendErr, state, { budget, note, trace, classifier, notice = null }) {
   const { opts, signal, transportRetriesUsed = 0 } = state;
   const attempt = transportRetriesUsed + 1;
-  const waitMs = transportRetryWaitMs(transportRetriesUsed, sendErr);
+  const waitMs = transportRetryWaitMs(transportRetriesUsed, sendErr, state);
   logLoop(`${note}; transport retry ${attempt}/${budget} after ${waitMs}ms`);
   const { kind, ...fields } = trace;
   traceLoop(state, kind, { attempt, waitMs, ...fields });
-  emitLoopReconnectProgress(opts, { attempt, maxAttempts: budget, waitMs, classifier, error: sendErr });
-  await sleepMs(waitMs, undefined, signal ? { signal } : undefined);
+  if (Number.isFinite(budget)) {
+    emitLoopReconnectProgress(opts, { attempt, maxAttempts: budget, waitMs, classifier, error: sendErr });
+  } else {
+    emitWaitingForNetwork(opts, { attempt, waitMs, classifier, error: sendErr });
+  }
+  // Chunked, abortable sleep: honored advice may exceed one timer's range.
+  await sleepWithAbort(waitMs, signal, undefined, 'transport retry wait aborted');
   return beginFreshTransportAttempt(opts, budget, notice);
 }
 
@@ -542,7 +649,7 @@ function continueFromShownText(sendErr, state, relayWitness) {
 // budget still bounds it.
 async function recoverToolInputCut(sendErr, outcome, state, retract) {
   const { transportRetriesUsed = 0 } = state;
-  const budget = retryBudgetFor(sendErr);
+  const budget = retryBudgetFor(sendErr, state);
   if (transportRetriesUsed < budget && (outcome.replaySafe === true || (await retract()))) {
     return scheduleTransportReplay(sendErr, state, {
       budget,
@@ -650,20 +757,55 @@ function recoverPartialToolCalls(sendErr, state, toolCalls, outcome) {
 // reasoning/text exposure makes classifyError() intentionally permanent,
 // non-terminal close, or a dropped connection (undici `terminated`, socket
 // reset) — then retract the exposed text and replay.
-async function transportReplayPermitted(sendErr, outcome, retract) {
-  if (outcome.replaySafe === true && classifyError(sendErr) === 'transient') return true;
-  const transportSymptom =
+async function transportReplayPermitted(sendErr, outcome, retract, state) {
+  if (!isSemanticallyRetryable(sendErr, state)) return false;
+  // Existing replay-safety gate: an unexposed failure replays outright only
+  // when it is typed-transient (or an opted-in in-band invalid_request); a
+  // named symptom replays after retraction.
+  if (
+    outcome.replaySafe === true &&
+    (classifyError(sendErr) === 'transient' || inBandInvalidRequestReplay(sendErr, state))
+  ) {
+    return true;
+  }
+  return await retract();
+}
+
+// The ONE semantic verdict on whether this failure is worth re-issuing,
+// independent of what was exposed (the replay-safety gate decides that
+// afterwards): never a deterministic refusal (quota, plan, billing, policy,
+// auth, permission, context or size) — server advice never makes one
+// retryable — and otherwise a named transient/transport symptom.
+function inBandInvalidRequestReplay(sendErr, state) {
+  return (
+    loopRetryPolicy(state).inBandInvalidRequestRetryable === true &&
+    providerErrorKind(sendErr).kind === 'invalid_request' &&
+    isRetryableStreamErrorEvent(sendErr)
+  );
+}
+
+function isSemanticallyRetryable(sendErr, state) {
+  if (isProviderRecoveryTerminal(sendErr)) return false;
+  // Opt-in (retryPolicy.inBandInvalidRequestRetryable): a provider whose
+  // in-band stream errors carry an invalid_request envelope for server faults
+  // replays one with no other deterministic evidence; for every other
+  // provider it is a final refusal.
+  const { kind } = providerErrorKind(sendErr);
+  if (DETERMINISTIC_KINDS.has(kind) && !inBandInvalidRequestReplay(sendErr, state)) {
+    return false;
+  }
+  return (
     classifyError(sendErr) === 'transient' ||
     isStreamCut(sendErr) ||
     isRetryableWireErrorEvent(sendErr) ||
     isRetryableStreamErrorEvent(sendErr) ||
-    isCursorTransientTransportError(sendErr);
-  return transportSymptom && (await retract());
+    isCursorTransientTransportError(sendErr)
+  );
 }
 
 function retryTransport(sendErr, state) {
   return scheduleTransportReplay(sendErr, state, {
-    budget: retryBudgetFor(sendErr),
+    budget: retryBudgetFor(sendErr, state),
     note:
       `[loop] transient send failure with no dispatched tools (${loopTag(state)} code=${sendErr?.code ?? 'n/a'} ` +
       `wsCloseCode=${sendErr?.wsCloseCode ?? 'n/a'} httpStatus=${sendErr?.httpStatus ?? sendErr?.status ?? 'n/a'})`,
@@ -700,7 +842,7 @@ function imageStripEligible(
       hasImages: promptHasInlineImages(recoveryMessages),
       alreadyStripped: imageStripUsed === true,
     }) ||
-      // Grok Build RetryWithImageStrip only: a bare stream error on a Grok
+      // Grok only: a bare stream error on a Grok
       // upload may be the image body being rejected. Other providers' transient
       // stream errors are not evidence about images and use normal transport retry.
       (isGrok &&

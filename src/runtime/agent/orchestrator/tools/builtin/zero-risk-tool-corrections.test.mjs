@@ -19,8 +19,8 @@ import { closeNativePatchServerForTests } from '../patch/native-server.mjs';
 test('shell wait_ms above the ceiling clamps; the message states the schema range', () => {
   const clamped = { command: 'echo x', wait_ms: 500000 };
   assert.equal(validateBuiltinArgs('shell', clamped), null);
-  assert.equal(clamped.wait_ms, 120000);
-  assert.match(validateBuiltinArgs('shell', { command: 'echo x', wait_ms: 5 }), /15000 to 120000/);
+  assert.equal(clamped.wait_ms, 30000);
+  assert.match(validateBuiltinArgs('shell', { command: 'echo x', wait_ms: 5 }), /10000 to 30000/);
 });
 
 test('read limit:0 reads the default window instead of failing', () => {
@@ -87,7 +87,7 @@ test('git: pipe rejection names the replacement; stringified command array runs 
     assert.match(substitution, /shell operators/);
     assert.doesNotMatch(substitution, /output_limit/);
     const out = await executeGitTool({ command: '["git --version","git --version"]' }, dir);
-    assert.equal(out.match(/^## git --version/gm)?.length, 2, out);
+    assert.equal(out.match(/^## \d+: git version/gm)?.length, 2, out);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

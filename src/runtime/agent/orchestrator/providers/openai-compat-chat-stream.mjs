@@ -11,6 +11,7 @@ import {
   PROVIDER_SEMANTIC_IDLE_TIMEOUT_MS,
   createTimeoutSignal,
 } from '../stall-policy.mjs';
+import { TIMEOUT_PHASE } from '../../../shared/provider-timeout-phase.mjs';
 import {
   closeCompatStream,
   markErrorLiveTextEmitted,
@@ -71,6 +72,7 @@ export async function consumeCompatChatCompletionStream(
         idleDeadlineAt: state.semanticIdleDeadlineAt,
         idleEnabled: state.sawFirstEvent && idleEnabled && state.semanticIdleDeadlineAt > 0,
         idleLabel: `${label} SSE idle`,
+        streamLabel: label,
         emittedToolCall: () => toolWorkStarted(state),
       });
       if (done) {
@@ -85,6 +87,10 @@ export async function consumeCompatChatCompletionStream(
     }
     if (state.leakGuard.enabled) flushLeak(state);
   } catch (err) {
+    // The first-byte window (not a caller cancellation) ended the wait for the first chunk.
+    if (!signal?.aborted && err && typeof err === 'object' && err === firstByteTimeout.signal.reason) {
+      err.timeoutPhase = TIMEOUT_PHASE.FIRST_CHUNK;
+    }
     // Keep exposed partial text without permitting the request to replay;
     // every mid-flight failure carries what the stream completed (a
     // cancellation keeps the caller's own reason untouched).

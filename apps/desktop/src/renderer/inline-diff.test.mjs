@@ -114,7 +114,7 @@ test('the pane stacks every changed file with its diff in one scroll: no list le
     assert.equal(sections[0].querySelector('.session-diff-section-title').title, 'src/cart.js');
     assert.equal(q('.session-diff-back'), null);
     assert.equal(q('.session-diff-files'), null);
-    assert.match(q('.session-diff-count').textContent, /2 files changed/);
+    assert.match(q('.session-diff-toolbar .session-diff-scope').title, /2 files changed/);
   } finally {
     await view.done();
   }
@@ -236,7 +236,8 @@ test('code lines wrap in every shared diff: the session pane and tool cards neve
     stack.match(
       new RegExp(`:is\\(\\.session-diff-section, \\.tool-diff-frame\\) \\.${part}\\s*\\{([^}]*)\\}`, 'u')
     )?.[1] ?? '';
-  assert.match(shared('inline-diff'), /font-size:\s*13px/u);
+  // 13px at the default chat text size; tool-card diffs follow its scale.
+  assert.match(shared('inline-diff'), /font-size:\s*calc\(13px \* var\(--mx-content-scale, 1\)\)/u);
   assert.doesNotMatch(shared('inline-diff'), /overflow-x/u);
   assert.equal(shared('inline-diff-code'), '');
   assert.equal(shared('inline-diff-row'), '');
@@ -372,7 +373,7 @@ for (const [state, sessionId, invoke, expectCount, expectRefreshDisabled] of [
       assert.equal(q('[data-dock-header]').length, 1);
       assert.equal(q('[aria-label="Changes"]').length >= 1, true);
       assert.equal(q('[aria-label="Close panel"]').length, 1);
-      assert.equal(q('.session-diff-count').length, expectCount ? 1 : 0);
+      assert.equal(q('.session-diff-toolbar .session-diff-scope[title]').length, expectCount ? 1 : 0);
       const refresh = view.container.querySelector('[aria-label="Refresh"]');
       if (refresh) assert.equal(refresh.disabled, expectRefreshDisabled);
     } finally {
@@ -401,7 +402,7 @@ test('file-count changes grow or shrink the stack in place', async () => {
         snapshot: { sessionId: 'sd-count', items: [{ id: 'rev-1' }], contentRevision: 1 },
       });
     });
-    await settle();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
     assert.equal(view.container.querySelectorAll('.session-diff-section').length, 2);
     assert.equal(view.container.querySelector('.session-diff-back'), null);
   } finally {

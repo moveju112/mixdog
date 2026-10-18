@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import type { DesktopSessionSummary } from '../shared/contract';
 import { beginBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
+import { commitForkGroupOrder, visibleForkRootIds } from './session-fork-groups';
 import {
-  commitVisibleOrder,
   listOrderId,
   splitListOrderId,
   syncCustomOrders,
@@ -17,6 +17,7 @@ import {
 } from './session-sidebar-sections';
 import {
   AUTOMATION_OPEN_KEY,
+  FORK_OPEN_KEY,
   PROJECT_OPEN_KEY,
   SECTION_OPEN_DEFAULTS,
   SECTION_OPEN_KEY,
@@ -30,6 +31,28 @@ import {
   type OpenStateStorage,
 } from './sidebar-open-state';
 import { usePersistedListOrder } from './use-persisted-list-order';
+
+/** Whether the session lists include agent sessions (persisted; Lead
+ *  sessions only by default). */
+export function useSidebarSessionFilter() {
+  const key = 'mixdog:session-sidebar-show-agents';
+  const [showAgents, setShowAgents] = useState(() => {
+    try {
+      return window.localStorage.getItem(key) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const updateShowAgents = useCallback((value: boolean) => {
+    setShowAgents(value);
+    try {
+      window.localStorage.setItem(key, String(value));
+    } catch {
+      /* The current view still changes when persistence is unavailable. */
+    }
+  }, []);
+  return { showAgents, updateShowAgents };
+}
 
 /** Open/collapsed map persisted under `storageKey`; updates write through. */
 function usePersistedOpenMap(
@@ -76,7 +99,14 @@ export function useSidebarOpenState(allRows: DesktopSessionSummary[]) {
     (key: string) => updateAutomationOpen((current) => toggleOpen(current, key)),
     [updateAutomationOpen]
   );
+  const [forkOpen, updateForkOpen] = usePersistedOpenMap(FORK_OPEN_KEY, readOpenMap);
+  const toggleFork = useCallback(
+    (sessionId: string) => updateForkOpen((current) => toggleOpen(current, sessionId)),
+    [updateForkOpen]
+  );
   return {
+    forkOpen,
+    toggleFork,
     favoritesOpen,
     recentOpen,
     projectsOpen,
@@ -173,8 +203,10 @@ export function useSessionRowReorder({
       visible: isOpen(projectOpen, group.key) ? Math.min(limit, group.rows.length) : 0,
     });
   }
+  // Reordering is group-aware like rendering: one id per fork group (its
+  // original), over the same whole-group head the list renders.
   const visibleOrderIds = [...orderLists].flatMap(([listKey, list]) =>
-    list.rows.slice(0, list.visible).map((session) => listOrderId(listKey, session.id))
+    visibleForkRootIds(list.rows, list.visible).map((sessionId) => listOrderId(listKey, sessionId))
   );
   return usePersistedListOrder('mixdog:session-sidebar-session-rows', visibleOrderIds, {
     accepts: (sourceId, targetId) => splitListOrderId(sourceId).listKey === splitListOrderId(targetId).listKey,
@@ -182,15 +214,11 @@ export function useSessionRowReorder({
       const { listKey } = splitListOrderId(sourceId);
       const list = orderLists.get(listKey);
       if (!list) return;
-      const nextVisible = next
+      const nextRootIds = next
         .map(splitListOrderId)
         .filter((entry) => entry.listKey === listKey)
         .map((entry) => entry.sessionId);
-      const full = commitVisibleOrder(
-        list.rows.map((session) => session.id),
-        list.visible,
-        nextVisible
-      );
+      const full = commitForkGroupOrder(list.rows, list.visible, nextRootIds);
       updateCustomOrders((current) => ({ ...current, [listKey]: full }));
       // Dragging in an activity-ordered list turns that list's mode to Custom.
       const kind = listKey === 'favorites' ? 'favorites' : 'sessions';

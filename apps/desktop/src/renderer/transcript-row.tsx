@@ -1,10 +1,22 @@
-import { SlidersHorizontal } from 'lucide-react';
-import { Suspense, createContext, memo, useContext, useEffect, useRef, useState } from 'react';
+import { GitCommitHorizontal, GitPullRequest, SlidersHorizontal, Upload } from 'lucide-react';
+import { parseIslandGitRequestText } from './island-git-request';
+import { Suspense, createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { submissionIdentity } from './transcript-rows';
-import { fitImageThumbnail, persistentImagePreviews, previewKey } from './image-preview-store';
+import {
+  fitImageThumbnail,
+  onSessionPreviewsDeleted,
+  persistentImagePreviews,
+  previewKey,
+} from './image-preview-store';
 import { AttachmentCard, composerCardMeta } from './attachment-card';
-import { extractFileMarkers, fileChipKind, sentFileSource, sentPastedTextSource } from './attachment-menu';
-import { useAttachmentContextMenu } from './attachment-context-menu';
+import {
+  extractFileMarkers,
+  fileChipKind,
+  sentFileSource,
+  sentPastedTextSource,
+  type StoredAttachment,
+} from './attachment-menu';
+import { openAttachmentSource, useAttachmentContextMenu } from './attachment-context-menu';
 import { MarkdownOpenFileContext, MarkdownSessionContext, MarkdownTranscriptItemContext } from './MarkdownLink';
 import type { TranscriptItem } from './desktop-types';
 import { isOtherDevice } from '../shared/session-devices';
@@ -18,8 +30,11 @@ import {
   resolveStreamingMarkdownChunks,
 } from './streaming-markdown';
 import StreamingMarkdownBody from './StreamingMarkdownBody';
+import { preloadSyncMarkdownParser } from './markdown-worker-client';
 import { imagePreviewCache, imagePreviewKey } from './transcript-metrics';
 import { CopyControl } from './transcript-primitives';
+import { noteStreamCommit } from './transcript-stream-metrics';
+import { usePacedTranscriptText } from './use-paced-transcript-text';
 import { type BackgroundWorkCounts, CompletionStatus } from './transcript-status';
 import { shouldSuppressFullyFailedToolItem } from './transcript-tool-model';
 import { ToolCard } from './transcript-tool-ui';
@@ -42,12 +57,20 @@ const StableMarkdownBody = memo(function StableMarkdownBody({ text }: { text: st
 const MarkdownResponse = memo(function MarkdownResponse({ text, streaming }: { text: string; streaming: boolean }) {
   const markdownCache = useRef(createStreamingMarkdownCache());
   const workerPipeline = useRef(streaming);
+  useLayoutEffect(() => {
+    if (streaming) noteStreamCommit(text.length);
+  }, [streaming, text]);
   if (streaming) workerPipeline.current = true;
+  // Every reply loads the main-thread parser: a reply that arrives whole, or
+  // the next settled row, then paints parsed in its first commit.
+  useEffect(() => {
+    void preloadSyncMarkdownParser();
+  }, []);
   const markdownParts = resolveStreamingMarkdownChunks(text, streaming, markdownCache.current);
   const renderedChunks = markdownParts.stableChunks.map((chunk, index) => (
     <Suspense fallback={<span hidden data-transcript-pending />} key={markdownParts.stableChunkKeys[index]}>
       {workerPipeline.current ? (
-        <StreamingMarkdownBody text={chunk} copyControl={CopyControl} />
+        <StreamingMarkdownBody text={chunk} sync copyControl={CopyControl} />
       ) : (
         <StableMarkdownBody text={chunk} />
       )}
@@ -64,6 +87,7 @@ const MarkdownResponse = memo(function MarkdownResponse({ text, streaming }: { t
             text={markdownParts.unstableText}
             parseText={unstableParseText}
             parse={markdownParts.parseUnstable}
+            sync
             copyControl={CopyControl}
           />
         ) : (
@@ -155,6 +179,12 @@ function markerChipRefs(
 const inflightThumbnails = new Map<string, Promise<string | undefined>>();
 const failedThumbnails = new Set<string>();
 
+// A deleted session's attachments are gone with it: forget their misses.
+onSessionPreviewsDeleted((session) => {
+  const prefix = previewKey(session, '');
+  for (const key of failedThumbnails) if (key.startsWith(prefix)) failedThumbnails.delete(key);
+});
+
 /** The cached thumbnail of a stored attachment; on a miss it is rebuilt from
  *  the stored original through the host (one host call per ref at a time). A
  *  ref the host has no picture for is not asked again in this run; a failed
@@ -211,6 +241,33 @@ function useStoredImagePreview(session: string, attachmentRef: string | undefine
   return sync ?? (loaded?.key === key ? loaded.url : undefined);
 }
 
+/** The host file behind a sent image: its store reference in this session. */
+function storedAttachmentRef(session: string, ref: string | undefined): StoredAttachment | undefined {
+  return session && ref && /^[a-f0-9]{64}$/.test(ref) ? { sessionId: session, id: ref } : undefined;
+}
+
+type SentAttachmentRecord = NonNullable<TranscriptItem['attachments']>[number];
+
+/** The message-metadata attachment each file / pasted chip stands for: files
+ *  by their name first, then pasted texts by name or, failing that, in order. */
+function chipAttachments(
+  records: TranscriptItem['attachments'],
+  fileChips: readonly { name: string }[],
+  pastedChips: readonly { name: string }[]
+): { files: Array<SentAttachmentRecord | undefined>; pasted: Array<SentAttachmentRecord | undefined> } {
+  const pool = Array.isArray(records) ? [...records] : [];
+  const take = (match: (record: SentAttachmentRecord) => boolean) => {
+    const at = pool.findIndex(match);
+    return at < 0 ? undefined : pool.splice(at, 1)[0];
+  };
+  const files = fileChips.map((chip) => take((record) => record.name === chip.name && record.kind !== 'image'));
+  const pasted = pastedChips.map(
+    (chip) =>
+      take((record) => record.name === chip.name && record.kind === 'text') ?? take((record) => record.kind === 'text')
+  );
+  return { files, pasted };
+}
+
 function SentImageCard({
   session,
   attachmentRef,
@@ -231,6 +288,8 @@ function SentImageCard({
 }) {
   const stored = useStoredImagePreview(session, attachmentRef);
   const preview = live || stored;
+  const openFile = useContext(MarkdownOpenFileContext);
+  const hostFile = storedAttachmentRef(session, attachmentRef);
   return (
     <AttachmentCard
       kind="image"
@@ -238,10 +297,14 @@ function SentImageCard({
       imageUrl={preview || undefined}
       tooltip={tooltip}
       meta={preview ? undefined : dims}
-      menu={menuProps(preview ? { kind: 'image', name, dataUrl: preview } : { kind: 'image-marker', name })}
+      menu={menuProps(
+        preview
+          ? { kind: 'image', name, dataUrl: preview, stored: hostFile }
+          : { kind: 'image-marker', name, stored: hostFile }
+      )}
       onOpen={
         preview
-          ? () => void window.mixdogDesktop?.openAttachmentImage?.(preview, name)?.catch(() => undefined)
+          ? () => openAttachmentSource({ kind: 'image', name, dataUrl: preview, stored: hostFile }, openFile)
           : undefined
       }
     />
@@ -397,6 +460,8 @@ function SentAttachments({
   menuProps: ReturnType<typeof useAttachmentContextMenu>['menuProps'];
 }) {
   const markerRefs = markerChipRefs(markerChips, item.imageRefs);
+  const records = chipAttachments(item.attachments, fileChips, pastedChips);
+  const hostFileOf = (record: SentAttachmentRecord | undefined) => storedAttachmentRef(session, record?.id);
   return (
     // biome-ignore lint/a11y/useSemanticElements: a <fieldset> brings its own border, padding and min-width into the card row.
     <div className="message-attachments" role="group" aria-label={t('Attachments')}>
@@ -431,6 +496,7 @@ function SentAttachments({
       ))}
       {pastedChips.map((chip, index) => {
         const stored = sentPastedTextSource(chip.token, chip.name, item.id);
+        const hostFile = hostFileOf(records.pasted[index]);
         return (
           <AttachmentCard
             // biome-ignore lint/suspicious/noArrayIndexKey: chips are parsed from a sent message and never reorder.
@@ -439,13 +505,14 @@ function SentAttachments({
             name={chip.name}
             content={stored.kind === 'pasted-text' ? stored.text : undefined}
             meta={t('{{count}} lines', { count: chip.lines })}
-            menu={menuProps(() => sentPastedTextSource(chip.token, chip.name, item.id))}
+            menu={menuProps(() => ({ ...sentPastedTextSource(chip.token, chip.name, item.id), stored: hostFile }))}
           />
         );
       })}
       {fileChips.map((chip, index) => {
         const kind = fileChipKind(chip);
         const stored = sentFileSource(chip, item.id);
+        const hostFile = hostFileOf(records.files[index]);
         let meta = '';
         let content: string | undefined;
         if (stored.kind === 'text-file' && stored.text !== undefined) {
@@ -463,7 +530,7 @@ function SentAttachments({
             name={chip.name}
             content={content}
             meta={meta}
-            menu={menuProps(() => sentFileSource(chip, item.id))}
+            menu={menuProps(() => ({ ...sentFileSource(chip, item.id), stored: hostFile }))}
           />
         );
       })}
@@ -480,8 +547,15 @@ export const TranscriptRow = memo(
     backgroundWork,
     attachedUser = false,
     disclosureScope = '',
+    paceKey = '',
+    pace = false,
   }: {
+    /** Background work still running; passed only to the latest completion. */
     backgroundWork?: BackgroundWorkCounts;
+    /** Row key of a live assistant part; its painted text is paced. */
+    paceKey?: string;
+    /** The part is still the newest content row of its turn. */
+    pace?: boolean;
     item: TranscriptItem;
     completion?: TranscriptItem;
     animateComplete?: boolean;
@@ -492,11 +566,24 @@ export const TranscriptRow = memo(
     const multiDevice = useContext(TranscriptDevicesContext);
     const viewerDevice = useContext(TranscriptViewerDeviceContext);
     const sessionScope = useContext(MarkdownSessionContext);
-    const previousStreaming = useRef(Boolean(item.streaming));
-    const announceSettled = previousStreaming.current && !item.streaming;
+    const assistant = item.kind === 'assistant';
+    const articleRef = useRef<HTMLElement>(null);
+    const paced = usePacedTranscriptText({
+      key: assistant ? paceKey : '',
+      scope: sessionScope,
+      element: articleRef,
+      text: assistant ? String(item.text || '') : '',
+      streaming: Boolean(item.streaming),
+      pace,
+    });
+    // A reply stays "streaming" on screen until its paced reveal drained: the
+    // footer, copy control and completion announcement wait for the text.
+    const streaming = Boolean(item.streaming) || paced.draining;
+    const previousStreaming = useRef(streaming);
+    const announceSettled = previousStreaming.current && !streaming;
     useEffect(() => {
-      previousStreaming.current = Boolean(item.streaming);
-    }, [item.streaming]);
+      previousStreaming.current = streaming;
+    }, [streaming]);
     const { menuProps, menuElement } = useAttachmentContextMenu(useContext(MarkdownOpenFileContext));
     if (item.kind === 'tool') {
       if (shouldSuppressFullyFailedToolItem(item)) return null;
@@ -523,7 +610,28 @@ export const TranscriptRow = memo(
       return <CompletionStatus item={{ kind: 'turndone', status: 'cancelled', elapsedMs: 0 } as TranscriptItem} />;
     }
     if (!isVisibleTranscriptItem(item)) return null;
-    const metadata = messageMetadata(item);
+    const gitRequest = user ? parseIslandGitRequestText(text) : null;
+    if (gitRequest) {
+      const RequestIcon =
+        gitRequest.action === 'pr'
+          ? GitPullRequest
+          : gitRequest.action === 'commit-push'
+            ? Upload
+            : GitCommitHorizontal;
+      return (
+        <article ref={articleRef} className={`message user ${item.pending ? 'pending' : ''}`}>
+          <div className="message-body island-git-request">
+            <RequestIcon size={15} aria-hidden="true" />
+            <b>{gitRequest.label}</b>
+            {gitRequest.meta ? <span className="island-git-request-meta">{gitRequest.meta}</span> : null}
+          </div>
+        </article>
+      );
+    }
+    const showFooter = !user && !streaming && Boolean(completion);
+    // Only the footer shows the time. Formatting it per render cost the live
+    // row a locale lookup on every paced frame.
+    const metadata = showFooter ? messageMetadata(item) : null;
     const attachedImages = user && Array.isArray(item.images) ? item.images : [];
     const imageMarkers = user ? extractImageMarkers(text) : { text, chips: [] };
     const markerChips = attachedImages.length > 0 ? [] : imageMarkers.chips;
@@ -540,8 +648,9 @@ export const TranscriptRow = memo(
     return (
       <>
         <article
-          className={`message ${user ? 'user' : 'assistant'} ${sourceLabel ? 'sourced-message' : ''} ${item.streaming ? 'streaming' : 'settled'} ${item.pending ? 'pending' : ''} ${user && attachedUser ? 'attached-user' : ''}`}
-          aria-live={item.streaming || announceSettled ? 'off' : undefined}
+          ref={articleRef}
+          className={`message ${user ? 'user' : 'assistant'} ${sourceLabel ? 'sourced-message' : ''} ${streaming ? 'streaming' : 'settled'} ${item.pending ? 'pending' : ''} ${user && attachedUser ? 'attached-user' : ''}`}
+          aria-live={streaming || announceSettled ? 'off' : undefined}
           aria-busy={item.pending === true ? 'true' : undefined}
         >
           {sourceLabel && <small className="message-source">{sourceLabel}</small>}
@@ -577,8 +686,8 @@ export const TranscriptRow = memo(
               ))}
               {!user && (
                 // Only a settled reply's links can be downloaded by its row id.
-                <MarkdownTranscriptItemContext.Provider value={item.streaming ? '' : String(item.id ?? '')}>
-                  <MarkdownResponse text={text} streaming={Boolean(item.streaming)} />
+                <MarkdownTranscriptItemContext.Provider value={streaming ? '' : String(item.id ?? '')}>
+                  <MarkdownResponse text={paced.text} streaming={streaming} />
                 </MarkdownTranscriptItemContext.Provider>
               )}
             </div>
@@ -587,7 +696,13 @@ export const TranscriptRow = memo(
           {user && multiDevice && isOtherDevice(item.device, viewerDevice) && (
             <small className="message-device">{t('from {{device}}', { device: item.device })}</small>
           )}
-          {!user && !item.streaming && completion && (
+          {!user && !item.streaming && completion && paced.draining && (
+            // The live band's slot, same height as the footer: the band row
+            // left in this commit, and the footer takes the slot once the
+            // paced text is whole.
+            <div className="response-footer-band" aria-hidden="true" />
+          )}
+          {showFooter && completion && (
             // biome-ignore lint/a11y/useSemanticElements: the footer names a group of response details; a <fieldset> would restyle it.
             <footer className="response-footer" role="group" aria-label={t('Response details')}>
               <CompletionStatus
@@ -596,7 +711,7 @@ export const TranscriptRow = memo(
                 completionActivityKey={completionActivityKey}
                 backgroundWork={backgroundWork}
               />
-              {metadata.shortTime && <time className="message-time">{metadata.shortTime}</time>}
+              {metadata?.shortTime && <time className="message-time">{metadata.shortTime}</time>}
               {text && <CopyControl value={text} label="Copy response" className="message-actions response-copy" />}
             </footer>
           )}
@@ -617,5 +732,7 @@ export const TranscriptRow = memo(
     previous.backgroundWork?.shell === next.backgroundWork?.shell &&
     previous.backgroundWork?.agent === next.backgroundWork?.agent &&
     previous.attachedUser === next.attachedUser &&
+    previous.paceKey === next.paceKey &&
+    previous.pace === next.pace &&
     previous.disclosureScope === next.disclosureScope
 );

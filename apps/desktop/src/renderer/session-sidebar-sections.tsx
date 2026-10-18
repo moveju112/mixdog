@@ -6,6 +6,8 @@ import React, { useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { InitialSurface } from './InitialSurface';
 import type { DesktopProjectSummary, DesktopSessionSummary } from '../shared/contract';
+import { strongestSessionAttention, type SessionAttention } from '../shared/session-attention';
+import { SessionRowStatusIcon, SessionRowUnreadDot } from './session-status-mark';
 import {
   clampDesktopPanelWidth,
   DESKTOP_SIDEBAR_DEFAULT_WIDTH,
@@ -95,6 +97,9 @@ export function groupAutomationSessions(activityOrderedRows: DesktopSessionSumma
   }
   return [...groups.entries()].map(([key, group]) => ({ key, ...group }));
 }
+
+/** Renders `rows` as fork groups, covering at most `limit` rows (all by default). */
+export type RenderForkRows = (rows: readonly DesktopSessionSummary[], limit?: number) => React.ReactNode;
 
 /** Panel-header action slot. Rail destinations (Projects/Workflows/Schedules/
  *  Webhooks) hand their primary action to the panel title row instead of
@@ -262,13 +267,13 @@ export function favoritesSection({
   open,
   onToggleOpen,
   headerProps,
-  renderSessionRow,
+  renderRows,
 }: {
   rows: DesktopSessionSummary[];
   open: boolean;
   onToggleOpen(): void;
   headerProps?: ReorderProps;
-  renderSessionRow(session: DesktopSessionSummary): React.ReactNode;
+  renderRows: RenderForkRows;
 }) {
   return (
     <section className="sidebar-recent sidebar-favorites" aria-label={t('Favorites')} {...reorderTarget(headerProps)}>
@@ -285,7 +290,7 @@ export function favoritesSection({
       </div>
       {open && (
         <nav className="session-list favorite-session-list" aria-label={t('Favorites')}>
-          {rows.map(renderSessionRow)}
+          {renderRows(rows)}
         </nav>
       )}
     </section>
@@ -307,7 +312,8 @@ export function recentSection({
   archiveAllDisabled,
   onArchiveAll,
   headerProps,
-  renderSessionRow,
+  renderRows,
+  allRows,
 }: {
   headerProps?: ReorderProps;
   sessionsReady: boolean;
@@ -320,7 +326,9 @@ export function recentSection({
   hasHeadingDot: boolean;
   archiveAllDisabled: boolean;
   onArchiveAll(): void;
-  renderSessionRow(session: DesktopSessionSummary): React.ReactNode;
+  /** Renders the full list's fork groups, covering `visibleRows.length` rows. */
+  renderRows: RenderForkRows;
+  allRows: readonly DesktopSessionSummary[];
 }) {
   return (
     <section className="sidebar-recent" aria-label={t('Recent sessions')} {...reorderTarget(headerProps)}>
@@ -362,7 +370,7 @@ export function recentSection({
           ) : (
             sessionsReady && rowCount === 0 && <p className="sidebar-section-empty">{t('No sessions')}</p>
           )}
-          {visibleRows.map(renderSessionRow)}
+          {renderRows(allRows, visibleRows.length)}
           {hasMoreRows && (
             <div
               ref={sentinelRef}
@@ -454,8 +462,10 @@ interface ProjectsSectionProps {
   onNewTask(projectPath: string): void;
   folderReorderProps(key: string): ReorderProps;
   headerProps?: ReorderProps;
-  unreadSessionIds?: ReadonlySet<string>;
-  renderSessionRow(session: DesktopSessionSummary, groupKey: string): React.ReactNode;
+  /** The strongest status of one session; a collapsed folder shows its
+   *  sessions' strongest. */
+  attentionOf(sessionId: string): SessionAttention | '';
+  renderRows(rows: readonly DesktopSessionSummary[], limit: number, groupKey: string): React.ReactNode;
 }
 
 /** One project folder: its drag/drop target, folder row (with inline rename and
@@ -469,8 +479,8 @@ function projectFolderGroup(
     onNewTask,
     onToggleProject,
     folderReorderProps,
-    unreadSessionIds,
-    renderSessionRow,
+    attentionOf,
+    renderRows,
     onFolderMenu,
     rename,
     sessionDrop,
@@ -479,7 +489,8 @@ function projectFolderGroup(
   const expanded = isOpen(projectOpen, group.key);
   const reorder = folderReorderProps(group.key);
   const limit = rowLimits.get(group.key) ?? PROJECT_SESSION_PAGE_ROWS;
-  const unread = !expanded && group.rows.some((session) => unreadSessionIds?.has(session.id));
+  // A collapsed folder speaks for its hidden sessions with their strongest status.
+  const attention = expanded ? '' : strongestSessionAttention(group.rows.map((session) => attentionOf(session.id)));
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop target; the keyboard path is the session menu's Move to project
     <div
@@ -551,17 +562,16 @@ function projectFolderGroup(
           <span className="session-row-copy">
             <b>{group.name}</b>
           </span>
-          {unread && (
-            <span
-              className="session-row-unread-dot"
-              role="status"
-              aria-label={t('{{name}} has new activity', { name: group.name })}
-            />
+          {attention === 'unread' && <SessionRowUnreadDot name={group.name} />}
+          {attention && attention !== 'unread' && (
+            <span className="session-row-status">
+              <SessionRowStatusIcon status={attention} name={group.name} />
+            </span>
           )}
         </button>
-        {/* Like a collapsed section heading: the unread dot takes the
+        {/* Like a collapsed section heading: the status mark takes the
             trailing slot, so the + yields until the folder opens. */}
-        {!unread && (
+        {!attention && (
           <button
             type="button"
             className="row-overflow-trigger project-folder-new"
@@ -576,7 +586,7 @@ function projectFolderGroup(
       {expanded && (
         <div className="project-group-sessions">
           {group.rows.length === 0 && <p className="sidebar-section-empty">{t('No sessions')}</p>}
-          {group.rows.slice(0, limit).map((session) => renderSessionRow(session, group.key))}
+          {renderRows(group.rows, limit, group.key)}
           {group.rows.length > limit && (
             <button type="button" className="session-row project-group-more" onClick={() => onShowMore(group.key)}>
               <span className="session-row-copy">
@@ -640,9 +650,11 @@ export function archivedSection({
   onRestoreAll,
   onDeleteAll,
   headerProps,
-  renderSessionRow,
+  renderRows,
+  allRows,
 }: {
   headerProps?: ReorderProps;
+  allRows: readonly DesktopSessionSummary[];
   visibleRows: DesktopSessionSummary[];
   hasMoreRows: boolean;
   sentinelRef: React.RefObject<HTMLDivElement | null>;
@@ -651,7 +663,7 @@ export function archivedSection({
   actionsDisabled: boolean;
   onRestoreAll(): void;
   onDeleteAll(): void;
-  renderSessionRow(session: DesktopSessionSummary): React.ReactNode;
+  renderRows: RenderForkRows;
 }) {
   return (
     <section
@@ -698,7 +710,7 @@ export function archivedSection({
       </div>
       {open && (
         <nav className="session-list archived-session-list" aria-label={t('Archived sessions')}>
-          {visibleRows.map(renderSessionRow)}
+          {renderRows(allRows, visibleRows.length)}
           {hasMoreRows && (
             <div
               ref={sentinelRef}

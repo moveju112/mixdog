@@ -42,6 +42,9 @@ export function createStandaloneAgent({
   sessionSurface = null,
   awaitKeychainPrewarm = async () => {},
   isKeychainPrewarmReady = () => true,
+  // Provider model catalog for user-pinned spawn models; absent on surfaces
+  // without one, where only exact provider + model pass.
+  listProviderModels = null,
 }) {
   const canUseSessionSurface = (session) =>
     typeof sessionSurface?.runTurn === 'function' && sessionSurface.canRun?.(session) !== false;
@@ -105,6 +108,7 @@ export function createStandaloneAgent({
     sendFlow,
     closeFlow,
     terminalTrace,
+    listProviderModels,
   });
 
   function getStatus(context = {}) {
@@ -147,7 +151,10 @@ export function createStandaloneAgent({
     recoverWorkers,
     upsertLeadSession: registry.upsertLeadSession,
     updateLeadWorkerCwd: registry.updateLeadWorkerCwd,
+    forgetLeadSession: registry.forgetLeadSession,
     closeAll: closeFlow.closeAll,
     dispose: (options) => registry.dispose(options),
+    disposeAsync: (options) => registry.disposeAsync(options),
+    flushIndexWrites: () => registry.flushIndexWrites(),
   };
 }

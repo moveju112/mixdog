@@ -5,6 +5,139 @@ the Unreleased section is empty, and stamps it with the released version.
 
 ## Unreleased
 
+## v1.2.4 - 2026-10-17
+
+Added agent session control and fallback model assignment, automatic worktree preparation, harness output optimization, and overall performance improvements.
+
+### 1. Harness improvements: reduced output, cleaner styles, and general stabilization
+
+- Adjusted agent completion reports and question cards to be more concise, and reduced Git, search, and GitHub tool outputs to save tokens.
+- Changed background shell and external tool process cleanup to be more reliable, and adjusted unresponsive agent detection during long tasks.
+
+### 2. Media generation improvements
+
+- Added transparent background support and preferred model pinning by media type, and improved ChatGPT image generation stability.
+
+### 3. Agent fallback model assignment
+
+- Added fallback models that engage in order when the primary model fails, and allowed specifying a model directly when spawning sub-agents (#86).
+
+### 4. Worktree improvements
+
+- Added automatic package installation and environment setup when creating a new worktree, and improved branch menu responsiveness.
+
+### 5. Provider tool call stabilization
+
+- Fixed Claude thinking handling errors and added usage tracking on Antigravity, and reinforced reasoning and tool call reliability on custom gateways (#79, #94, thanks @22nsuk and @sukjong2002).
+- Adjusted Antigravity connection and retry handling for better stability, and improved tool execution in Cursor and OpenAI-compatible environments.
+- Added the ability to check the status of PC-registered providers directly from remote SSH windows (#77, thanks @22nsuk).
+- Changed Anthropic and ChatGPT request compression to handle large requests with safe fallback, speeding up initial responses.
+
+### 6. Agent session management refresh
+
+- Changed finished agents to remain in the panel for one hour, and restored the task count summary by status and waiting notices.
+
+### 7. Lead agent session management
+
+- Added the ability for lead agents to view other sessions and their contents, and manage them directly by sending messages, cancelling, or deleting sessions.
+
+### 8. Remote and desktop performance optimizations
+
+- Adjusted remote reconnects to quickly catch up on missed content, and improved mobile streaming smoothness and session switching speed.
+- Added reopening the two most recent sessions directly on mobile, and fixed freezes on the launch screen.
+- Adjusted desktop panels, sidebar, session switching, editor, and settings screens to open faster and transition more smoothly.
+
+### 9. Remote app download improvements
+
+- Added zip downloads for folders excluding unnecessary files in the remote web app, and expanded the range of downloadable files via conversation links.
+- Adjusted mobile file saving and notification enabling (file saving on Android/iOS applies after an app update).
+
+### 10. Other bug fixes and minor improvements
+
+- Changed SSH remote model connections to remove call and rate limits (#101).
+- Fixed paused Goals to resume automatically after usage resets, and fixed several bugs in the Changes panel and command status display.
+- Fixed the internal browser getting blocked by Google login and bot detection checks (#102).
+
+## v1.2.3 - 2026-10-16
+
+Since launch, far more of you have been using Mixdog than we expected, and we are truly grateful. Some parts are still unstable, and we are fixing them as quickly as we can. Your issues and pull requests shaped much of this release. If something goes wrong, please let us know from **Settings → About → Feedback**.
+
+New to Auto reasoning? A small judge model on your PC picks how hard the model thinks for each message and step. Read how it works and how it did on Terminal-Bench 2.1 in [Auto reasoning effort](https://github.com/tribgames/mixdog/blob/main/docs/auto-reasoning-effort.md).
+
+Added moving a chat into a worktree from the composer island, smoother streaming text, and a faster, more reliable background service.
+
+### New features
+
+- **Worktrees from the island** — Added a branch segment to the composer island that moves a chat into a worktree, carrying or leaving uncommitted changes.
+- **Question cards** — Added a card for questions an agent asks you, in the desktop app and the TUI.
+- **`/btw`** — Added `/btw` to ask a quick question without interrupting the current task.
+- **Session tool** — Added a tool that lets the agent rename, compact, fork, and move the current session (#14, thanks @hyeon1035298).
+- **Several PCs on Android** — Added switching between up to 16 saved PCs in the Android app (#83, thanks @yupguni).
+- **Recover interrupted edits** — Added a recovery panel that shows file edits interrupted by a crash and restores or discards them safely (#60, thanks @22nsuk).
+
+### Changes
+
+- Changed streaming replies to appear smoothly as they are written instead of in line-sized bursts.
+- Changed quitting, new chats, and the Changes panel to respond much faster.
+- Changed MCP tool schemas to be converted for each provider, so tools that work in other apps work in Mixdog; a broken tool is skipped with a notice.
+- Changed usage totals to stay hidden when a provider did not report usage for every call (#90, #91, thanks @22nsuk).
+- Changed moving changes into a worktree to refuse files Git hides from status, so no edit is lost.
+- Changed settings backups to stay with each profile, so one profile's settings are never overwritten by another's.
+- Changed the Visualize version strip to a Versions menu, and added tab renaming by double-click and slash command highlighting.
+- Changed provider icons to the official logos.
+- Changed Auto reasoning to also run on ChatGPT sign-in routes.
+
+### Bug fixes
+
+- Fixed Claude models on Antigravity failing with HTTP 400 because of tool schemas (#80, thanks @ProofPage).
+- Fixed the New branch button in chat doing nothing (#85, thanks @oh1701).
+- Fixed newly started agents not seeing MCP tools on their first turn (#88, thanks @oh1701).
+- Fixed the background service freezing when deleting sessions, and deleted sessions or their tabs coming back.
+- Fixed the database sometimes staying open after quitting the app.
+- Fixed the first message after switching a chat's model failing with "Session state changed unexpectedly".
+- Fixed the Android back button not closing the right side panel.
+- Fixed the island branch name appearing late and shifting the layout, and shell rows flickering as a command finished.
+- Fixed the side panel staying open after its last tab closed, and the Visualize panel staying collapsed when a visual opened.
+- Fixed developer provider switches showing off after turning them on, and custom provider errors showing internal messages.
+- Fixed the transcript jumping when the composer changed height.
+
+### Other
+
+- Fixed a desktop build error (#89, thanks @22nsuk).
+
+## v1.2.2 - 2026-10-14
+
+Added explicit MCP OAuth sign-in, in-place model switching, and a one-line quota banner.
+
+### New features
+
+- **MCP sign-in** — Added explicit OAuth sign-in for MCP servers with status, a shared login dialog, remote paste, and TUI commands (#74, thanks @oh1701).
+- **Switch model in place** — Added switching a chat's model without starting a new session, and Fork in the session menu (#73, #52, thanks @grapefruit0205).
+- **Quota banner** — Added a one-line banner above the composer when a limit is reached; Resume reserves the next run for the reset time.
+- **Files menu** — Added an island Files count that tracks uncommitted session changes, with View changes and Delete history.
+- **Chat text size** — Added a per-device chat text size setting.
+
+### Changes
+
+- Changed provider retries to follow each provider's own limits and wait times, showing the remaining wait with a way to cancel.
+- Changed error messages to name the cause and next step, and to hide Retry when retrying cannot help.
+- Changed shell commands to stay in the foreground for 10 seconds by default, up to 30 seconds, before moving to the background.
+- Adjusted the desktop app, auto reasoning, and the background service to use less polling, rendering, and memory in long sessions.
+
+### Bug fixes
+
+- Fixed the background service freezing for one to two seconds every 30 minutes.
+- Fixed Agent completion notices being dropped when a turn that already had output was cancelled.
+- Fixed the composer island showing running Agents as idle or done.
+- Fixed switching sessions stalling when waiting on other sessions' change scans.
+- Fixed browser page dialogs leaving the pane, leave confirmation failing to complete, and browser copy shortcuts failing.
+- Fixed prompt caching failing on custom Responses providers and inherited session projects not matching the sidebar (#70, #75, thanks @sukjong2002).
+- Fixed streaming tables flickering, the transcript bouncing while a turn works, and the quota card staying after switching providers.
+
+### Other
+
+- Removed unused helpers (#67, thanks @22nsuk).
+
 ## v1.2.1 - 2026-10-14
 
 Added conversation import from Codex and Claude Code, the Command Code provider, and `$` skill mentions, and fixed Computer Use input observation, skill scripts, auto reasoning, and several session issues.

@@ -31,6 +31,8 @@ interface SessionClientModule {
     onUpgradeWait?: (info: DaemonUpgradeWait) => void;
   }): Promise<Record<string, unknown>>;
   forceDaemonUpgrade(options?: { log?: (line: string) => void }): Promise<boolean>;
+  /** Quit only: stop a daemon this process forked into its own tree. */
+  stopInTreeDaemon?(options?: { timeoutMs?: number }): Promise<boolean>;
   /** Health + protocol verdict for an explicit discovery; reads no files. */
   probeSessionCompatibility(
     discovery: Record<string, unknown>,
@@ -247,8 +249,7 @@ export class SessionTransport implements DesktopTransport {
     if (remote) {
       const endpoint = await this.measureBootPhase(
         'remote-connect',
-        () =>
-          remote.connect((line) => this.emit('diagnostic', 'remote-daemon-log', { detail: line, attempt })),
+        () => remote.connect((line) => this.emit('diagnostic', 'remote-daemon-log', { detail: line, attempt })),
         { attempt }
       );
       await this.checkRemoteCompatibility(daemonModule, remote, endpoint, attempt);
@@ -399,7 +400,10 @@ export class SessionTransport implements DesktopTransport {
 
   /** Spawn-or-attach the machine-local daemon, waiting out an older build
    *  that is still draining. */
-  private async ensureLocalDaemon(daemonModule: SessionClientModule, attempt: number): Promise<Record<string, unknown>> {
+  private async ensureLocalDaemon(
+    daemonModule: SessionClientModule,
+    attempt: number
+  ): Promise<Record<string, unknown>> {
     let discovery: Record<string, unknown>;
     let upgradeWaiting = false;
     const emitUpgradeWait = (state: 'waiting' | 'done', fromVersion?: unknown, toVersion?: unknown): void => {
@@ -648,5 +652,13 @@ export class SessionTransport implements DesktopTransport {
   async close(): Promise<void> {
     this.closed = true;
     await this.closeClient('desktop view closed');
+  }
+
+  /** App quit only (never a transport restart): a local daemon this process
+   *  forked into its own tree exits with the app, so let it shut down — and
+   *  stop the PostgreSQL it started — before that happens. */
+  async stopInTreeDaemon(timeoutMs: number): Promise<boolean> {
+    if (this.remote || !this.daemonModule?.stopInTreeDaemon) return false;
+    return this.daemonModule.stopInTreeDaemon({ timeoutMs });
   }
 }

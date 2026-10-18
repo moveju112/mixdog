@@ -9,6 +9,59 @@ import {
   watchdogPartialHandoffFromError,
   watchdogStoppedHandoff,
 } from './agent-progress-watchdog.mjs';
+import { PROVIDER_FIRST_BYTE_TIMEOUT_MS, STALL_TICK_MS } from '../stall-policy.mjs';
+
+test('the first-transport deadline sits one tick above the provider first-byte window', () => {
+  const providerWindow = 466_000;
+  const policy = resolveAgentWatchdogPolicy('worker', { providerFirstByteTimeoutMs: providerWindow });
+  assert.equal(policy.firstTransportMs, providerWindow + STALL_TICK_MS);
+  // The provider is still inside its own first-byte window and retry.
+  const now = 10_000_000;
+  const waiting = {
+    stage: 'requesting',
+    modelRequestStartedAt: now - providerWindow,
+    waitingForTransport: true,
+    waitingForFirstSemantic: true,
+  };
+  assert.equal(evaluateAgentWatchdogAbort(waiting, now, policy), null);
+  const late = { ...waiting, modelRequestStartedAt: now - providerWindow - STALL_TICK_MS - 1 };
+  assert.match(evaluateAgentWatchdogAbort(late, now, policy).message, /^agent first transport stale \(/);
+});
+
+test('the first-semantic ceiling covers the provider first-output budget, so a retry ends as the provider failure', () => {
+  const outputBudget = 931_000;
+  const policy = resolveAgentWatchdogPolicy('worker', {
+    providerFirstByteTimeoutMs: 466_000,
+    providerFirstOutputTimeoutMs: outputBudget,
+  });
+  assert.equal(policy.firstSemanticMs, outputBudget + STALL_TICK_MS);
+  // Headers arrived, the retry is still waiting for its first chunk.
+  const now = 10_000_000;
+  const silent = {
+    stage: 'requesting',
+    modelRequestStartedAt: now - 700_000,
+    waitingForTransport: false,
+    waitingForFirstSemantic: true,
+  };
+  assert.equal(evaluateAgentWatchdogAbort(silent, now, policy), null);
+  const late = { ...silent, modelRequestStartedAt: now - outputBudget - STALL_TICK_MS - 1 };
+  assert.match(evaluateAgentWatchdogAbort(late, now, policy).message, /^agent first semantic response stale \(/);
+  // Without a provider budget the 600s ceiling is unchanged.
+  assert.equal(resolveAgentWatchdogPolicy('worker').firstSemanticMs, 600_000);
+});
+
+test('a per-agent first-response deadline applies above the floor; 0 keeps it off', () => {
+  assert.equal(
+    resolveAgentWatchdogPolicy('art-director', { firstResponseTimeoutMs: 900_000 }).firstTransportMs,
+    900_000
+  );
+  // Below the provider window the floor wins, so the provider decides first.
+  assert.equal(
+    resolveAgentWatchdogPolicy('art-director', { firstResponseTimeoutMs: 1_000 }).firstTransportMs,
+    PROVIDER_FIRST_BYTE_TIMEOUT_MS + STALL_TICK_MS
+  );
+  assert.equal(resolveAgentWatchdogPolicy('art-director', { firstResponseTimeoutMs: 0 }).firstTransportMs, 0);
+});
 
 test('a long tool call is not a stall while its heartbeat keeps progress fresh', () => {
   const policy = resolveAgentWatchdogPolicy('worker');
@@ -58,6 +111,51 @@ test('partial handoff collects only assistant text appended in the current turn'
   );
   assert.equal(start, 1);
   assert.equal(partialHandoffTextFromSession(session, start), 'first\n\nsecond\nthird');
+});
+
+test('partial handoff falls back to visible providerReplay text when content is empty', () => {
+  const replay = (provider, items) => ({ version: 1, provider, items });
+  const session = {
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 't1' }],
+        providerReplay: replay('anthropic', [
+          { type: 'thinking', thinking: 'private', text: 'hidden-thinking' },
+          { type: 'text', text: 'PARTIAL-REPORT-OK' },
+          { type: 'tool_use', id: 't1', name: 'read', input: { text: 'tool-payload' } },
+        ]),
+      },
+      {
+        role: 'assistant',
+        content: '',
+        providerReplay: replay('openai-responses', [
+          { type: 'reasoning', summary: [{ type: 'summary_text', text: 'hidden-reasoning' }] },
+          { type: 'message', content: [{ type: 'output_text', text: 'openai-visible' }] },
+          { type: 'function_call', call_id: 'c1', arguments: '{"text":"tool-payload"}' },
+        ]),
+      },
+      {
+        role: 'assistant',
+        content: '',
+        providerReplay: replay('gemini', [
+          { thought: true, text: 'hidden-thought' },
+          { text: 'gemini-visible' },
+          { functionCall: { name: 'read', args: {} } },
+        ]),
+      },
+      {
+        role: 'assistant',
+        content: 'content wins',
+        providerReplay: replay('anthropic', [{ type: 'text', text: 'replay loses' }]),
+      },
+    ],
+  };
+  assert.equal(
+    partialHandoffTextFromSession(session),
+    'PARTIAL-REPORT-OK\n\nopenai-visible\n\ngemini-visible\n\ncontent wins'
+  );
 });
 
 test('watchdog handoff preserves supported stale-error messages and the turn boundary', () => {

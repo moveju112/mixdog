@@ -86,6 +86,9 @@ export class OpenAIOAuthProvider {
   // so input alone is the context footprint. See registry.mjs.
   static inputExcludesCache = false;
   name = 'openai-oauth';
+  // Loop retry policy (send-with-recovery loopRetryPolicy): a connect failure waits for
+  // the network, and a content_filter refusal is replayed under the budget.
+  retryPolicy = Object.freeze({ unboundedConnectionRetry: true, contentFilterRetryable: true });
   tokens = null;
   _refreshFallbackUntil = 0;
   // Sticky transport fallback is isolated by the WS pool/session key. A
@@ -149,6 +152,11 @@ export class OpenAIOAuthProvider {
     return this.tokens;
   }
 
+  /** Drop a disposed transport scope's sticky transport record. */
+  releaseTransportScope(scope) {
+    this._httpFallbackUntilByPoolKey.delete(scope);
+  }
+
   send(messages, model, tools, sendOpts) {
     return withEffortConfigurationFallback('openai-oauth', model, sendOpts || {}, (opts) =>
       this._sendOnce(messages, model, tools, opts)
@@ -204,7 +212,8 @@ export class OpenAIOAuthProvider {
     // session. cacheKey is body.prompt_cache_key and affects prompt-cache
     // routing only; Codex handshake identity comes from sendOpts and remains
     // independent so a future cache-lane policy cannot merge conversations.
-    const poolKey = opts.sessionId || null;
+    // A forked request runs in its own transport scope (transport-scope.mjs).
+    const poolKey = opts.transportScope || opts.sessionId || null;
     const cacheKey = body.prompt_cache_key || resolveProviderCacheKey(opts, 'openai-oauth');
     const iteration = Number.isFinite(Number(opts.iteration)) ? Number(opts.iteration) : null;
     const sendWs = typeof opts._sendViaWebSocketFn === 'function' ? opts._sendViaWebSocketFn : sendViaWebSocket;
@@ -277,6 +286,8 @@ export class OpenAIOAuthProvider {
           process.stderr.write(`[agent-trace] provider-${status}-retry attempt=1\n`);
         }
         this._refreshFallbackUntil = 0;
+        // One forced refresh per send, shared with the HTTP/SSE dispatch.
+        authState.authRefreshed = true;
         authState.tokens = await this.ensureAuth({ forceRefresh: true, reason: String(status) });
         try {
           const result = await dispatch.dispatchWs(true);

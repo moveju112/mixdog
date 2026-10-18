@@ -2,10 +2,17 @@
 // Local pre-push check. Mirrors the test legs of .github/workflows/release-gate.yml
 // (jobs: runtime, runtime-slow, desktop, desktop-tests fast/slow). It MUST be
 // updated together with that workflow whenever those commands change.
+// Up front, before any build or leg, it runs two fast source checks and stops
+// if either fails: the gate's shipped-history job (build-shipped-history.mjs
+// --check; needs a full clone, a shallow one keeps the committed file), and the
+// released-section changelog check the desktop fast lane asserts
+// (changelog-locales.test.mjs; Deploy's plan adds the Unreleased section).
 // Not covered locally: runtime-macos, computer-backend (cargo + Linux X11),
 // desktop-tests `computer` lane (windows-latest, src/main/computer/ only),
-// relay (apps/relay tests), graph (cargo test). The gate's path filtering is
-// not applied: every leg always runs. Run `npm ci` (root and apps/desktop) first.
+// relay (apps/relay tests), graph (cargo test), patch (cargo test of the
+// checked-out engine), mobile-scripts (Python unittest). The gate's path
+// filtering is not applied: every check and leg always runs. Run `npm ci`
+// (root and apps/desktop) first.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -16,6 +23,15 @@ import { gateTestBudget, runGateLegs } from './lib/gate-scheduler.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const started = Date.now();
 
+const preChecks = ['node scripts/build-shipped-history.mjs --check', 'node scripts/check-changelog-locales.mjs'];
+const failedPreChecks = preChecks.filter(
+  (cmd) => spawnSync(cmd, { cwd: root, stdio: 'inherit', shell: true }).status !== 0
+);
+if (failedPreChecks.length) {
+  console.error(`[gate:local] pre-check failed: ${failedPreChecks.join('; ')}`);
+  process.exit(1);
+}
+
 const build = spawnSync('npm run build:spawn:test', { cwd: root, stdio: 'inherit', shell: true });
 if (build.status !== 0) {
   console.error('[gate:local] build:spawn:test failed');
@@ -25,11 +41,13 @@ if (build.status !== 0) {
 const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mixdog-gate-local-'));
 const resourceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mixdog-gate-resources-'));
 const budget = gateTestBudget();
+// weight: relative worker share, roughly each leg's measured duration x its 3 workers
+// (runtime ~440s, runtime-slow ~545s, desktop fast ~390s, desktop slow ~280s).
 const legs = [
-  { name: 'runtime', cmds: ['npm test', 'npm run smoke:patch'] },
-  { name: 'desktop-tests-fast', cmds: ['npm test --prefix apps/desktop'] },
-  { name: 'runtime-slow', cmds: ['npm run test:slow'] },
-  { name: 'desktop-tests-slow', cmds: ['npm run test:slow --prefix apps/desktop'] },
+  { name: 'runtime', weight: 3, cmds: ['npm test', 'npm run smoke:patch'] },
+  { name: 'desktop-tests-fast', weight: 3, cmds: ['npm test --prefix apps/desktop'] },
+  { name: 'runtime-slow', weight: 4, cmds: ['npm run test:slow'] },
+  { name: 'desktop-tests-slow', weight: 2, cmds: ['npm run test:slow --prefix apps/desktop'] },
   { name: 'desktop', cmds: ['npm run build --prefix apps/desktop', 'npm run test:daemon:e2e --prefix apps/desktop'] },
 ];
 
@@ -87,7 +105,7 @@ for (const leg of legs) {
   }
 }
 console.log(
-  'Not covered locally: runtime-macos, computer-backend, desktop-tests computer lane (Windows-only), relay, graph'
+  'Not covered locally: runtime-macos, computer-backend, desktop-tests computer lane (Windows-only), relay, graph, patch, mobile-scripts'
 );
 console.log(`Total: ${((Date.now() - started) / 1000).toFixed(1)}s`);
 process.exit(legs.every((l) => l.ok) ? 0 : 1);

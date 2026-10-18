@@ -50,6 +50,19 @@ export function workspaceSummary(value) {
 
 /** Dedupe key of an imported conversation: a session's `importOrigin.key`,
  *  or a summary row's projected `importKey`; null for ordinary sessions. */
+export function inheritedFromSessionId(value) {
+  const id = typeof value?.inheritedFromSessionId === 'string' ? value.inheritedFromSessionId.trim() : '';
+  return id || null;
+}
+
+/** Count of real human turns a session persisted (actual user instructions
+ *  plus compact summaries, which stand for earlier human turns); null for a
+ *  row written before the field existed. */
+export function realTurnCount(value) {
+  const count = value?.realTurnCount;
+  return typeof count === 'number' && Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
+}
+
 export function importKey(value) {
   const key = typeof value?.importKey === 'string' ? value.importKey : value?.importOrigin?.key;
   return typeof key === 'string' && key.trim() ? key : null;

@@ -21,6 +21,8 @@ import type {
   SessionSnapshot,
   ToolApprovalDecision,
 } from '../shared/contract';
+import { projectIdentity } from '../shared/project-identity';
+import { isSessionMissingError } from './session-final-answer';
 import { reportTranscriptRead, transcriptReadTraceId } from '../shared/transcript-read-diagnostics';
 import { normalizeSessionTitle, promptTitle } from '../shared/session-title.mjs';
 import { TRANSCRIPT_READ_TIMEOUT_MS } from '../shared/transcript-read-policy';
@@ -60,6 +62,7 @@ export interface SessionHostLifecycleOwner {
   registeredProject(path: string): Promise<string>;
   touchProject(path: string): Promise<void>;
   resolveSessionWorkspace(projectPath?: string | null): Promise<SessionWorkspaceResolution>;
+  sessionProjectPath(session?: DesktopSessionSummary): Promise<string | null>;
   projectDirectory(projectPath: string): Promise<string>;
   openHints(sessionId: string): Record<string, unknown>;
   readSession(
@@ -163,7 +166,9 @@ export class SessionHostLifecycle {
   private async unsubscribeQuietly(sessionId: string): Promise<void> {
     try {
       await this.owner.client.unsubscribe({ sessionId }, this.owner.callOptions());
-    } catch {}
+    } catch {
+      // Best-effort: the subscription is abandoned either way.
+    }
   }
 
   async renameSession(sessionId: string, title: string): Promise<void> {
@@ -214,6 +219,23 @@ export class SessionHostLifecycle {
     }
   }
 
+  /** Explicit force-release of a shell job whose termination is unconfirmed,
+   *  through the runtime that holds its workspace admission. */
+  async releaseShellJob(sessionId: string, taskId: string): Promise<{ released: boolean; error?: string }> {
+    const id = sessionIdOf(sessionId);
+    try {
+      const { value } = await this.owner.invokeSession(id, 'releaseShellJob', [taskId]);
+      const result = (value && typeof value === 'object' ? value : {}) as { released?: unknown; error?: unknown };
+      if (result.released === true) return { released: true };
+      return {
+        released: false,
+        error: typeof result.error === 'string' && result.error ? result.error : 'The job was not released.',
+      };
+    } catch (error) {
+      return { released: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async getQuotaAutoResume(): Promise<boolean> {
     return (await this.owner.invokeControl('getQuotaAutoResume', [])) === true;
   }
@@ -229,11 +251,28 @@ export class SessionHostLifecycle {
     await this.republishSessionCatalog();
   }
 
-  async setSessionProject(sessionId: string, projectPath: string | null): Promise<void> {
+  /** The sidebar's "move to project": a real working-folder change through the
+   *  runtime's project switch (the `session` tool's set-project path). A
+   *  registered project's folder, or '' for the task workspace; a session
+   *  already in that project stays put. */
+  async setSessionProject(sessionId: string, projectPath: string): Promise<void> {
     const id = sessionIdOf(sessionId);
-    await this.owner.sessionMetadata.load();
-    if (!(await this.owner.sessionMetadata.setProject(id, projectPath))) return;
-    await this.republishSessionCatalog();
+    const row = (await this.owner.listSessions()).find((entry) => entry.id === id);
+    if (!row) throw new Error('Session is not available.');
+    const target = projectPath.trim() ? await this.owner.registeredProject(projectPath) : null;
+    if (projectIdentity(await this.owner.sessionProjectPath(row)) === projectIdentity(target)) return;
+    const live = this.owner.publication.projections.get(id)?.snapshot;
+    if (row.leadWorking || live?.busy || live?.commandBusy) {
+      throw new Error('The session is running a turn; wait for it to finish before moving it to another project.');
+    }
+    if (row.workspace?.worktreeId) {
+      throw new Error(
+        'The session works in a managed worktree; merge or remove the worktree before moving it to another project.'
+      );
+    }
+    const cwd = target ? await this.owner.canonicalDirectory(target) : await this.owner.taskWorkspace();
+    await this.owner.invokeSession(id, 'setCwd', [cwd]);
+    await this.owner.publishCatalogs();
   }
 
   async setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
@@ -248,11 +287,19 @@ export class SessionHostLifecycle {
 
   async deleteSession(sessionId: string): Promise<SessionSnapshot> {
     const id = sessionIdOf(sessionId);
-    if (!(await this.owner.listSessions()).some((row) => row.id === id)) {
-      throw new Error('Session is not available.');
-    }
-    if ((await this.owner.invokeControl('deleteSession', [id])) !== true) {
-      throw new Error('Session could not be deleted.');
+    // Deleting a missing or already-deleted session is a no-op, never an error
+    // surfaced to the UI; stale local state for it is still dropped below.
+    if ((await this.owner.listSessions()).some((row) => row.id === id)) {
+      let deleted = false;
+      try {
+        deleted = (await this.owner.invokeControl('deleteSession', [id])) === true;
+      } catch (error) {
+        if (!isSessionMissingError(error)) throw error;
+        deleted = true;
+      }
+      if (!deleted && (await this.owner.listSessions()).some((row) => row.id === id)) {
+        throw new Error('Session could not be deleted.');
+      }
     }
     await this.unsubscribeQuietly(id);
     this.owner.visibleSessionIds.delete(id);
@@ -478,6 +525,7 @@ export class SessionHostLifecycle {
         ...(typeof draft.route.contextPercent === 'number' ? { contextPercent: draft.route.contextPercent } : {}),
         ...(typeof draft.route.contextTokens === 'number' ? { contextTokens: draft.route.contextTokens } : {}),
         applyToCurrentSession: true,
+        keepMainModel: false,
       },
     ]);
     const resolvedRoute =
@@ -519,6 +567,9 @@ export class SessionHostLifecycle {
     this.owner.pendingCatalogSessionIds.add(sessionId);
     this.owner.applySessionResult(sessionId, created);
     try {
+      // Record the applied draft, so a replay after an ambiguous submission
+      // goes straight to the idempotent submit even if the draft's workflow,
+      // mode or route can no longer be applied.
       if (request.phase === 'reserved') {
         await this.configureDraft(sessionId, draft);
         await request.commit('configured');
@@ -529,21 +580,39 @@ export class SessionHostLifecycle {
       // this submission and the draft stays unsent. Runs on every attempt; the
       // submission id makes a resend reuse the same worktree.
       if (draft.worktree) {
-        const provisioned = await this.owner.invokeSession(sessionId, 'requestWorktree', [
-          {
-            provision: true,
-            confirmLarge: draft.worktree.confirmLarge === true,
-            prompt: promptTitle(prompt, options.displayText || ''),
-            txId: submissionId,
-          },
-        ]);
+        const provisioned = draft.worktree.branch
+          ? await this.owner.invokeSession(sessionId, 'selectBranch', [
+              {
+                branch: draft.worktree.branch,
+                create: draft.worktree.create === true,
+                confirmLarge: draft.worktree.confirmLarge === true,
+              },
+            ])
+          : await this.owner.invokeSession(sessionId, 'requestWorktree', [
+              {
+                provision: true,
+                // A new task starts its worktree at the current commit and never
+                // takes the project folder's uncommitted changes with it.
+                carryChanges: 'leave',
+                confirmLarge: draft.worktree.confirmLarge === true,
+                prompt: promptTitle(prompt, options.displayText || ''),
+                txId: submissionId,
+              },
+            ]);
         // Only a bound session may receive the prompt. A runtime that merely
         // armed the lazy intent (pending) would run the turn in the project
         // folder, and a turn that then fails before provisioning (no model,
         // no provider) would drop the choice: refuse instead, so the draft
         // keeps its text and its "Worktree" choice.
-        const value = provisioned.value as { pending?: unknown; workspace?: { worktreeId?: unknown } } | null;
-        if (value?.pending !== false || typeof value.workspace?.worktreeId !== 'string') {
+        const value = provisioned.value as {
+          pending?: unknown;
+          workspace?: { worktreeId?: unknown; branch?: unknown };
+        } | null;
+        if (
+          draft.worktree.branch
+            ? value?.workspace?.branch !== draft.worktree.branch
+            : value?.pending !== false || typeof value.workspace?.worktreeId !== 'string'
+        ) {
           throw Object.assign(
             new Error('WORKTREE_NOT_IMPLEMENTED: The session did not enter its worktree before the first prompt.'),
             { code: 'WORKTREE_NOT_IMPLEMENTED' }
@@ -619,9 +688,8 @@ export class SessionHostLifecycle {
   ): Promise<{ sessionId: string; snapshot: SessionSnapshot | null }> {
     const source = sessionIdOf(sourceSessionId);
     const rows = await this.owner.listSessions();
-    const { cwd, desktopSession } = await this.owner.resolveSessionWorkspace(
-      rows.find((entry) => entry.id === source)?.projectPath
-    );
+    const projectPath = await this.owner.sessionProjectPath(rows.find((entry) => entry.id === source));
+    const { cwd, desktopSession } = await this.owner.resolveSessionWorkspace(projectPath);
     const created = await this.owner.client.create(
       {
         cwd,
@@ -753,15 +821,13 @@ export class SessionHostLifecycle {
 
   async setModelRoute(selection: DesktopModelSelection, sessionId?: string): Promise<SessionSnapshot> {
     const target = sessionId || (await this.owner.ensureControlSession());
-    const { value, snapshot } = await this.owner.invokeSession(target, 'setRoute', [
+    const { snapshot } = await this.owner.invokeSession(target, 'setRoute', [
       {
         ...selection,
         applyToCurrentSession: true,
+        keepMainModel: Boolean(sessionId),
       },
     ]);
-    if (value === false) {
-      throw new Error('Model change was not applied because another session command is running.');
-    }
     return snapshot;
   }
 

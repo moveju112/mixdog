@@ -7,14 +7,20 @@
  * turn record below that finalization publishes as the turndone item.
  */
 import { applyUsageDelta } from './session-stats.mjs';
+import {
+  createTranscriptRouteMetadata,
+  transcriptRouteMetadataFields,
+} from '../../runtime/shared/transcript-metadata.mjs';
+import { publishModelSwitch } from './session-api/routes.mjs';
 import { compactEventLabel } from '../../runtime/shared/compact-event-label.mjs';
 import { pickVerb, pickDoneVerb, compactEventDetail } from './labels.mjs';
-import { toolErrorDisplay } from './tool-result-text.mjs';
-import { errText, isCancelLikeError } from '../../runtime/shared/err-text.mjs';
+import { isCancelLikeError } from '../../runtime/shared/err-text.mjs';
 import { preserveGoalStateAfterTurn } from './goal-turn-state.mjs';
 export { preserveGoalStateAfterTurn } from './goal-turn-state.mjs';
 export { transcriptToolCallDisplayMode } from './turn-tool-cards.mjs';
-import { isRejected429, safeErrorDetails } from '../../runtime/shared/error-presentation.mjs';
+import { isRejected429 } from '../../runtime/shared/error-presentation.mjs';
+import { QUOTA_KINDS, providerErrorKind } from '../../runtime/agent/orchestrator/providers/provider-error-kind.mjs';
+import { turnFailureRecord } from '../../runtime/agent/orchestrator/session/turn-failure.mjs';
 import { registerTaskWaitSteeringCheck } from '../../runtime/agent/orchestrator/session/task-wait-control.mjs';
 import { promptDisplayText, STEERING_SUPPRESSED_DISPLAY } from './queue-helpers.mjs';
 import { yieldToRenderer } from './render-timing.mjs';
@@ -46,15 +52,13 @@ import {
   collectClosingCards,
   startLiveTail,
 } from './turn-tool-cards.mjs';
+import { startQuietWatch } from './turn-quiet.mjs';
 
-function isUsageLimitError(error) {
+// A usage limit is exactly a spent quota, a plan-gated feature or a billing
+// refusal; overloads, rate limits and server faults recover by waiting.
+function isUsageLimitError(error, kind = providerErrorKind(error)) {
   if (!error || isRejected429(error)) return false;
-  const status = Number(error?.httpStatus || error?.status || error?.response?.status || 0);
-  if (error?.providerQuota === true || error?.quotaExceeded === true || status === 429) return true;
-  const text = String(error?.message || error);
-  return /\brate[_ -]?limit\b|\bquota\b|too many requests|resource exhausted|insufficient_quota|quota_exceeded/i.test(
-    text
-  );
+  return QUOTA_KINDS.has(kind.kind);
 }
 
 function turnOutcome(cancelled, failed) {
@@ -96,6 +100,13 @@ function streamingTailStore({ updateStreamingTail, settleStreamingTail, clearStr
 
 // The turn record: identity, transcript metadata, and the outcome fields
 // finalization publishes.
+export function applyTurnRouteMetadata(ctx, session) {
+  const metadata = transcriptRouteMetadataFields(createTranscriptRouteMetadata(session));
+  Object.assign(ctx.turn.transcriptMeta, metadata);
+  Object.assign(ctx.turn.routeMeta, metadata);
+  for (const id of ctx.turn.submittedIds) ctx.patchItem(id, metadata);
+}
+
 function beginTurn({ flags, getState, transcriptRouteMetadata }, options) {
   const index = getState().stats.turns || 0;
   const startedAt = Date.now();
@@ -104,6 +115,7 @@ function beginTurn({ flags, getState, transcriptRouteMetadata }, options) {
     ...(flags.pendingTranscriptMeta || transcriptRouteMetadata?.(startedAt) || { at: startedAt }),
     ...(options.transcriptMeta && typeof options.transcriptMeta === 'object' ? options.transcriptMeta : {}),
     completionVerb,
+    attemptId: globalThis.crypto.randomUUID(),
   };
   flags.pendingTranscriptMeta = null;
   // The prompt's own time and stable id stay on the prompt row.
@@ -165,7 +177,7 @@ function promptRestoreFor(displayText, options, submittedIds, content = null) {
   };
 }
 
-function commitPromptRestore(flags, turn) {
+export function commitPromptRestore(flags, turn) {
   const restore = flags.activePromptRestore;
   if (!restore) return;
   if (!turn.promptCommitted && typeof restore.onCommitted === 'function') {
@@ -389,16 +401,27 @@ function toolHandlers(ctx) {
   };
 }
 
-function streamHandlers(ctx) {
+export function streamHandlers(ctx) {
   const { isCurrentTurn, stream } = ctx;
   return {
     onStageChange: async (stage, detail = null) => {
-      if (isCurrentTurn()) await applyStageChange(stream, stage, detail);
+      if (!isCurrentTurn()) return;
+      // A runtime notice (e.g. a tool the provider left out of the request)
+      // becomes a transcript notice the TUI and desktop render.
+      if (stage === 'notice') {
+        flushStreamBatch(stream);
+        ctx.pushNotice(detail?.message, detail?.tone === 'warn' ? 'warn' : 'info', { transcript: true });
+        return;
+      }
+      await applyStageChange(stream, stage, detail);
     },
     onTextDelta: (chunk) => {
       const textChunk = String(chunk ?? '');
       if (!textChunk || !isCurrentTurn()) return;
-      ctx.markPromptCommitted();
+      // Same verdict as the runtime's interruption check (finalizeInterruptedTurn
+      // trims): whitespace-only text is not output, so it must not commit the
+      // prompt — the runtime would rewind it while the host skipped the requeue.
+      if (textChunk.trim()) ctx.markPromptCommitted();
       appendTextDelta(stream, textChunk);
     },
     onTextReset: (reset = {}) => (isCurrentTurn() ? resetStreamedText(stream, reset) : false),
@@ -448,17 +471,13 @@ export function failTurn(ctx, error) {
   }
   turn.failed = true;
   cards.aggregates.finalizeToolHeaders();
-  turn.usageLimited = isUsageLimitError(error);
-  const exhausted = error?.quotaExhausted;
-  if (exhausted && typeof exhausted === 'object') {
-    turn.quota = {
-      provider: String(exhausted.provider || turn.routeMeta?.provider || ''),
-      model: String(exhausted.model || turn.routeMeta?.model || ''),
-      resetAt: Number.isFinite(exhausted.resetAt) ? exhausted.resetAt : null,
-    };
-  }
-  turn.failureDetail = toolErrorDisplay(error, 'turn').replace(/^Error:\s*/i, '');
-  turn.failureDiagnostic = safeErrorDetails(errText(error));
+  const record = turnFailureRecord(error, { provider: turn.routeMeta?.provider, model: turn.routeMeta?.model });
+  // The UI reads this descriptor instead of re-parsing the error text.
+  turn.errorKind = record.errorKind;
+  turn.usageLimited = isUsageLimitError(error, record.providerKind);
+  if (record.quota) turn.quota = record.quota;
+  turn.failureDetail = record.detail;
+  turn.failureDiagnostic = record.errorDetails;
   pushNotice(turn.failureDetail, 'error', { owner: 'transcript' });
 }
 
@@ -485,6 +504,7 @@ export function turnDoneItem({ turn, stream, cards, getState, nextId }) {
     ...(turn.failureDiagnostic ? { errorDetails: turn.failureDiagnostic } : {}),
     ...turn.routeMeta,
     ...(turn.failed && turn.quota ? { quota: turn.quota } : {}),
+    ...(turn.failed && turn.errorKind ? { errorKind: turn.errorKind } : {}),
   };
 }
 
@@ -564,6 +584,7 @@ async function settleTurn(ctx) {
     result: turn.askResult,
     session: runtime.session || null,
     error: turn.failureDetail || null,
+    errorKind: turn.failed ? turn.errorKind || null : null,
   };
   // Publish termination before optional Goal work can delay the caller.
   bag.settleSteeredSubmissions?.(turn.epoch, detail);
@@ -626,6 +647,8 @@ export function createRunTurn(bag) {
     set({
       busy: true,
       lastTurn: null,
+      // A turn that unwound stale never cleared its desktop partial line.
+      ...(getState().streamingPartial ? { streamingPartial: null } : {}),
       spinner: {
         active: true,
         verb: pickVerb(turn.index),
@@ -653,7 +676,12 @@ export function createRunTurn(bag) {
       routeMeta: turn.routeMeta,
       sealToolBlock: cards.aggregates.clearAggregateContinuation,
     });
-    const stopLiveTail = startLiveTail(cards);
+    const stopToolTail = startLiveTail(cards);
+    const stopQuietWatch = startQuietWatch({ runtime, getState, set, isCurrentTurn });
+    const stopLiveTail = () => {
+      stopToolTail();
+      stopQuietWatch();
+    };
     const ctx = {
       ...bag,
       bag,
@@ -673,11 +701,20 @@ export function createRunTurn(bag) {
         submittedAt: options.submittedAt,
         promptSource: options.promptSource,
         retryFailedTurn: options.retryFailedTurn === true,
+        retryTurnId: options.retryTurnId,
+        retryAttemptId: options.retryAttemptId,
         transcriptMeta: turn.transcriptMeta,
         context: options.context || null,
         ...turnHandlers(ctx),
         ...toolHandlers(ctx),
         ...streamHandlers(ctx),
+        onRouteApplied: (session) => {
+          if (isCurrentTurn()) applyTurnRouteMetadata(ctx, session);
+        },
+        onModelSwitch: (boundary) => {
+          if (!isCurrentTurn()) return;
+          publishModelSwitch(bag, boundary);
+        },
       });
       if (!isCurrentTurn()) turn.cancelled = true;
       else completeTurn(ctx, result, session);

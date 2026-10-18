@@ -13,9 +13,19 @@ const STARTUP_SURFACE_FALLBACK_MS = 1_200;
 const DESKTOP_BOOT_COVER_MAX_MS = 4_000;
 const DESKTOP_BOOT_BRAND_FADE_MS = 100;
 
+type StartupHost = typeof window & { __mixdogWindowShown?: boolean; __mixdogDesktopRevealed?: boolean };
+
+/** The startup stagger only spaces the surfaces of the first screen. Electron
+ *  ends it with its window-shown handshake; a relay browser (the phone) has no
+ *  such event, so its boot reveal ends it — before, every surface it opened
+ *  later (a sheet's editor, terminal, diff) waited out the 1.2s fallback. */
+function startupWindowShown(host: StartupHost): boolean {
+  return host.__mixdogWindowShown === true || (isRemoteHostRenderer() && host.__mixdogDesktopRevealed === true);
+}
+
 function useStartupSurfaceReady(startupDelayMs: number | undefined): boolean {
-  const host = window as typeof window & { __mixdogWindowShown?: boolean };
-  const [ready, setReady] = useState(() => startupDelayMs === undefined || host.__mixdogWindowShown === true);
+  const host = window as StartupHost;
+  const [ready, setReady] = useState(() => startupDelayMs === undefined || startupWindowShown(host));
   useLayoutEffect(() => {
     if (ready || startupDelayMs === undefined) return undefined;
     let delayTimer = 0;
@@ -153,6 +163,23 @@ function useStableSurfaceReveal(ready: boolean, transitionKey: string | number =
     );
   }, [ready, reveal.revealed, sameKey, transitionKey]);
   return revealed;
+}
+
+/** A warm revisit reveals its transcript within a few frames; only a hold that
+ *  outlasts this grace puts the cover back. */
+export const SURFACE_HOLD_GRACE_MS = 300;
+
+function useSurfaceHold(hold: boolean): boolean {
+  const [holding, setHolding] = useState(false);
+  useLayoutEffect(() => {
+    if (!hold) {
+      setHolding(false);
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setHolding(true), SURFACE_HOLD_GRACE_MS);
+    return () => window.clearTimeout(timer);
+  }, [hold]);
+  return hold && holding;
 }
 
 /**
@@ -311,19 +338,59 @@ export function PaneSurfaceGate({
   );
 }
 
+const TRANSCRIPT_SKELETON_ROWS = [
+  { id: 'row-1', kind: 'user' },
+  { id: 'row-2', kind: 'assistant' },
+  { id: 'row-3', kind: 'tool' },
+  { id: 'row-4', kind: 'assistant' },
+  { id: 'row-5', kind: 'user' },
+  { id: 'row-6', kind: 'assistant' },
+] as const;
+
+/** A pane-sized transcript placeholder: static bars, painted in the same
+ *  frame the conversation is opened, until its first rows are revealed. */
+export function TranscriptSkeletonCover({ label }: { label: string }) {
+  return (
+    <div className="pane-surface-cover transcript-skeleton" role="status" aria-busy="true" aria-label={label}>
+      <div className="transcript-skeleton-rows">
+        {TRANSCRIPT_SKELETON_ROWS.map(({ id, kind }) => (
+          <div key={id} className="transcript-skeleton-row" data-kind={kind}>
+            <span />
+            {kind === 'assistant' && <span />}
+            {kind === 'assistant' && <span />}
+          </div>
+        ))}
+      </div>
+      <div className="transcript-skeleton-composer" />
+    </div>
+  );
+}
+
 /** Overlay form for layout-sensitive trees (Conversation/virtualizer) that
  * must remain a direct child of their existing flex container. */
 export function PaneSurfaceCover({
   ready,
   label,
   transitionKey,
+  hold = false,
+  skeleton = false,
 }: {
   ready: boolean;
   label: string;
   transitionKey?: string | number;
+  /** The covered content is hidden again (a revisit awaiting its reveal)
+   *  although this surface key already latched revealed. The cover returns
+   *  once the hold outlasts a warm settle, so a reveal within a few frames
+   *  never flashes it. */
+  hold?: boolean;
+  /** Paint a transcript skeleton at once instead of the delayed brand mark
+   *  (the phone, where the first rows cross the relay). */
+  skeleton?: boolean;
 }) {
   const revealed = useStableSurfaceReveal(ready, transitionKey);
-  if (revealed) return null;
+  const holding = useSurfaceHold(hold);
+  if (revealed && !holding) return null;
+  if (skeleton) return <TranscriptSkeletonCover label={label} />;
   return (
     <div className="pane-surface-cover">
       {/* A pane-sized cover that stays mute is indistinguishable from a broken
@@ -387,11 +454,15 @@ function movePersistentPaneHost(
 export function PersistentPanePortal({
   targetId,
   className = '',
+  retained = false,
   onPointerDownCapture,
   children,
 }: {
   targetId: string;
   className?: string;
+  /** Kept mounted but neither painted nor interactive (`data-retained`):
+   *  its layout, scroll offsets and rows survive for an instant return. */
+  retained?: boolean;
   onPointerDownCapture?: (event: PointerEvent) => void;
   children: ReactNode;
 }) {
@@ -400,6 +471,12 @@ export function PersistentPanePortal({
     element.className = `persistent-pane-surface${className ? ` ${className}` : ''}`;
     return element;
   });
+  useLayoutEffect(() => {
+    host.toggleAttribute('data-retained', retained);
+    host.inert = retained;
+    if (retained) host.setAttribute('aria-hidden', 'true');
+    else host.removeAttribute('aria-hidden');
+  }, [host, retained]);
   const [attached, setAttached] = useState(false);
   // Scroll offsets are recorded once a surface's scroll settles, so neither
   // the scroll itself nor the relocation forces a layout to read them back.

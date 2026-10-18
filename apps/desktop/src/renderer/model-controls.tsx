@@ -5,15 +5,17 @@ import type {
   DesktopOrchestrationMode,
   SessionSnapshot,
 } from '../shared/contract';
-import { beginBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
+import { beginBootSurface, holdBootSurface, reportBootSurfaceReady, reportBootSurfaceStage } from './boot-metrics';
 import { routePreferenceStore } from './app-route-preference';
 import { useModelSelection } from './use-model-selection';
 import type { RecordValue } from './desktop-types';
+import { isDesktopProvidersUnavailableError, useDesktopProvidersRetry } from './desktop-provider-retry';
 import { t } from './i18n';
 import {
   SHARED_MODEL_CATALOG_MAX_AGE_MS,
   readCachedModelCatalog,
   requestModelCatalog,
+  invalidateSharedModelCatalogRequest,
   subscribeModelCatalogInvalidation,
 } from './model-catalog-cache';
 import { customProviderDisplayNames, filterConfiguredModels } from './model-catalog';
@@ -26,7 +28,6 @@ import {
 } from './model-route-utils';
 import { RouteEditor } from './RouteEditor';
 import { routedExactContextTokens } from './route-editor-context';
-import { cancelQuotaContinue, takeQuotaContinue } from './quota-continue';
 import { hostRouteAutoEffort, routeAutoEffortCapable, useAutoEffortRoute } from './auto-effort-store';
 import { OpenSelect } from './OpenSelect';
 import { InitialSurface } from './InitialSurface';
@@ -359,6 +360,8 @@ export const ModelSelector = memo(function ModelSelector({
   const [providerSetup, setProviderSetup] = useState<unknown>(null);
   const [catalogError, setCatalogError] = useState('');
   const [providerSetupError, setProviderSetupError] = useState('');
+  // A server window whose desktop proxy is away retries on the shared cadence.
+  const [desktopProvidersAway, setDesktopProvidersAway] = useState(false);
   const [catalogLoaded, setCatalogLoaded] = useState(cachedCatalog.models.length > 0);
   const [startupCatalogSettled, setStartupCatalogSettled] = useState(cachedCatalog.models.length > 0);
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
@@ -392,6 +395,10 @@ export const ModelSelector = memo(function ModelSelector({
   const latestRouteToken = useRef(0);
   const modelBootKey = `${provider || 'none'}:${model || 'none'}`;
   beginBootSurface('model-controls', modelBootKey);
+  // A restored session renders its controls before its route is known
+  // (`none:none`), then re-keys on the route: the superseded key must not
+  // hold the boot cover waiting for a ready no render will report.
+  useEffect(() => holdBootSurface('model-controls', modelBootKey), [modelBootKey]);
   // An in-flight write no longer locks the controls. The selection is previewed
   // locally the moment it is clicked, so disabling the picker until the runtime
   // replied only made it look frozen — and swallowed the next click.
@@ -469,7 +476,9 @@ export const ModelSelector = memo(function ModelSelector({
       setCatalogRefreshing(true);
       setCatalogError('');
       setProviderSetupError('');
+      setDesktopProvidersAway(false);
       const shared = requestModelCatalog(api);
+      let fullApplied = false;
       const setupRequest = shared.setup
         .then((setup) => {
           if (shared.isCurrent()) setProviderSetup(setup);
@@ -478,10 +487,12 @@ export const ModelSelector = memo(function ModelSelector({
           if (!shared.isCurrent()) return;
           console.warn('[model-catalog] provider setup refresh failed', reason);
           setProviderSetupError('unavailable');
+          setDesktopProvidersAway(isDesktopProvidersUnavailableError(reason));
         });
       const fullRequest = shared.full
         .then((full) => {
           if (!shared.isCurrent() || !Array.isArray(full)) return;
+          fullApplied = true;
           setModels(full);
           setCatalogError('');
         })
@@ -498,7 +509,9 @@ export const ModelSelector = memo(function ModelSelector({
         });
       try {
         const quick = await shared.quick;
-        if (shared.isCurrent() && Array.isArray(quick) && quick.length > 0) {
+        // A reused shared request may already have resolved both answers.
+        // Its thin quick rows must not overwrite the full catalog above.
+        if (shared.isCurrent() && !fullApplied && Array.isArray(quick) && quick.length > 0) {
           setModels((current) => {
             const merged = new Map(current.map((option) => [`${option.provider}:${option.model}`, option]));
             for (const option of quick) {
@@ -551,6 +564,8 @@ export const ModelSelector = memo(function ModelSelector({
       }),
     [loadCatalog]
   );
+
+  useDesktopProvidersRetry(desktopProvidersAway, invalidateSharedModelCatalogRequest);
 
   useEffect(() => {
     if (model && !startupCatalogSettled) return;
@@ -631,13 +646,6 @@ export const ModelSelector = memo(function ModelSelector({
       ...(optionMaxWindow > 0 ? { contextPercent: nextContextPercent } : {}),
       ...(optionMaxWindow > 0 && sameModel ? exactContextField : {}),
     };
-    // "Continue in another model" after a quota stop: this explicit pick goes
-    // to the continue flow instead of the ordinary route change.
-    const continueInModel = sessionId ? takeQuotaContinue(sessionId) : null;
-    if (continueInModel) {
-      continueInModel(selection);
-      return true;
-    }
     return route(selection, !sameModel);
   };
   const changeFast = async (enabled: boolean) => {
@@ -861,9 +869,6 @@ export const ModelSelector = memo(function ModelSelector({
         onChangeAutoEffort={autoEffortRoute.onChangeAutoEffort}
         onOpenSheet={autoEffortRoute.onOpenSheet}
         answersModelPickerRequests={answersModelPickerRequests}
-        onClosed={() => {
-          if (sessionId) cancelQuotaContinue(sessionId);
-        }}
       />
     </div>
   );

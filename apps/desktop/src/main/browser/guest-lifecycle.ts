@@ -14,6 +14,7 @@ import { redactBrowserUrl } from './redaction';
 import { type BrowserSessionRegistry, DEFAULT_BROWSER_SESSION_ID } from './session-registry';
 import { createBrowserPageOwner } from './page-owner';
 import { injectPageScrollbarCss } from './page-scrollbar-css';
+import { injectJsonViewerTweaks } from './page-json-viewer';
 import { adoptBrowserPageWindow, browserPageWindow, createBrowserPageWindow } from './page-window';
 import { assertBackgroundTabCapacity, backgroundPageIdle, normalizeBackgroundTabName } from './tab-policy';
 import type { BackgroundPage } from './tabs-contract';
@@ -29,8 +30,6 @@ interface BrowserGuestLifecycleHost {
   sessions: BrowserSessionRegistry;
   cdp: Pick<BrowserGuestCdp, 'guestDebugger'>;
   urlPolicy: BrowserUrlPolicy;
-  /** Whether the agent bridge is on, so new guests get a debugger eagerly. */
-  bridgeWanted(): boolean;
   /** A background page mid-command must not be reclaimed as idle. */
   isBackgroundBusy(sessionId: string, name: string): boolean;
   onPopup?(opener: WebContents, popup: WebContents): void;
@@ -92,6 +91,10 @@ function offscreenWindowOptions(nativeView = false): Electron.BrowserWindowConst
       // Pages are throttled by default; page-power lifts it while a panel
       // displays the page or an agent command drives it.
       backgroundThrottling: true,
+      // A page's own JavaScript dialog is an OS dialog box in Electron, outside
+      // the pane and nobody's to answer. Dialogs reach the pane through the
+      // dialog bridge; anything that slips past it is dismissed instead.
+      disableDialogs: true,
     },
   };
 }
@@ -231,7 +234,7 @@ function nextPopupTabName(sessions: BrowserSessionRegistry, counters: Map<string
 }
 
 export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
-  const { window, state, sessions, cdp, urlPolicy, bridgeWanted, isBackgroundBusy, waitForLoadSettle } = host;
+  const { window, state, sessions, cdp, urlPolicy, isBackgroundBusy, waitForLoadSettle } = host;
   const createPage = () => createBrowserPageWindow(offscreenWindowOptions(host.nativeView === true), host.nativeView);
   const nextPopupIdsBySession = new Map<string, number>();
   const suspendedSessions = new Map<string, SavedPage[]>();
@@ -241,12 +244,15 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
     state.for(guest);
     host.onGuest?.(guest);
     injectPageScrollbarCss(guest);
+    injectJsonViewerTweaks(guest);
     const blockNavigation = blockUnsafeNavigation(state, urlPolicy, guest);
     guest.on('will-navigate', blockNavigation);
     guest.on('will-redirect', blockNavigation);
     guest.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
       if (isMainFrame) state.beginDocument(guest, isInPlace);
     });
+    // Emitted only once a main-frame navigation commits a new document.
+    guest.on('did-navigate', () => state.commitDocument(guest));
     guest.setWindowOpenHandler(({ url }) => {
       try {
         if (url !== 'about:blank') normalizePageUrl(url, urlPolicy);
@@ -258,6 +264,9 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
           return {
             action: 'allow',
             outlivesOpener: true,
+            // Electron creates the popup's page from these before createWindow
+            // adopts it, so its dialog setting must already be here.
+            overrideBrowserWindowOptions: popupWindowOptions(true),
             createWindow: (options) => {
               const popup = createBrowserPageWindow(
                 popupWindowOptions(true),
@@ -311,13 +320,16 @@ export function createBrowserGuestLifecycle(host: BrowserGuestLifecycleHost) {
       const record = state.for(guest);
       if (record.fault.startsWith(LOAD_FAULT)) record.fault = '';
     });
+    // Every page gets its debugger up front, agent bridge or not: a page
+    // dialog only reaches the pane through it, and without it Electron shows
+    // its own OS dialog box instead.
     if (deferDebugger) {
       // A popup already has a navigation owned by window.open. Attaching
       // before its first document can load about:blank over that navigation.
       guest.once('dom-ready', () => {
-        if (bridgeWanted() && !guest.isDestroyed()) attachDebuggerEagerly(guest);
+        if (!guest.isDestroyed()) attachDebuggerEagerly(guest);
       });
-    } else if (bridgeWanted()) attachDebuggerEagerly(guest);
+    } else attachDebuggerEagerly(guest);
   }
 
   /** Track a popup as its opener session's page, unless capacity is gone. */

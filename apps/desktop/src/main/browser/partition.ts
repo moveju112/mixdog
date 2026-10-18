@@ -1,19 +1,21 @@
 /**
  * The persistent partition every Browser Use page shares — visible pane tabs
  * and hidden background pages alike — so the agent stays logged in across
- * both. Three session-wide guards live here: agent pages get no ambient
- * permission, every request passes the URL policy (including its resolved
+ * both. Three session-wide guards live here: a site holds a permission only
+ * when a person granted it in the pane, every request passes the URL policy (including its resolved
  * address), and downloads land in the user's folder through a ledger the
  * `downloads` action can report.
  */
 import type { Session, WebContents } from 'electron';
-import { session } from 'electron';
+import { app, session } from 'electron';
 
+import { rememberBrowserIdentity } from './browser-identity';
 import { BROWSER_PARTITION } from './command';
 import { createBrowserDownloadLedger } from './downloads';
-import { clearBrowserPermissionHandlers, lockDownBrowserPermissions } from './permissions';
+import { clearBrowserPermissionHandlers, createBrowserPermissions } from './permissions';
 import { redactBrowserText } from './redaction';
-import { browserPartitionUserAgent } from './user-agent';
+import { browserRequestDisposition } from './request-scheme';
+import { browserAcceptLanguages, browserBrandRequestHeaders, browserPartitionUserAgent } from './user-agent';
 
 interface BrowserPartitionHost {
   /** Policy check for a page-generated request, DNS answer included. */
@@ -26,26 +28,34 @@ interface BrowserPartitionHost {
   onRequestRefused?(webContentsId: number | undefined, url: string, reason: string): void;
 }
 
-const WEB_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
-const EMBEDDED_ONLY_PROTOCOLS = new Set(['about:', 'data:', 'blob:']);
-
 export function createBrowserPartition(host: BrowserPartitionHost) {
   const partitionSession: Session = session.fromPartition(BROWSER_PARTITION);
-  // Agent-visited pages receive no ambient browser permission. A future
-  // capability-specific approval path can grant an individual request.
-  lockDownBrowserPermissions(partitionSession);
-  partitionSession.setUserAgent(browserPartitionUserAgent(partitionSession.getUserAgent()));
-  partitionSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(details.url);
-    } catch {
-      callback({ cancel: true });
-      return;
+  // A site gets a permission only from a person's answer in the pane.
+  const permissions = createBrowserPermissions();
+  permissions.install(partitionSession);
+  // Pages see the Chrome build that renders them, with the language list a
+  // Chrome profile seeds from the system's own languages.
+  const userAgent = browserPartitionUserAgent(partitionSession.getUserAgent());
+  const acceptLanguages =
+    browserAcceptLanguages([app.getSystemLocale(), ...app.getPreferredSystemLanguages()]) || undefined;
+  partitionSession.setUserAgent(userAgent, acceptLanguages);
+  rememberBrowserIdentity({ userAgent, acceptLanguages });
+  // Requests no page override covers (a service worker's, for one) leave
+  // with the engine's own agent string and brand list; both are rewritten
+  // here so every request of the partition names the same browser.
+  partitionSession.webRequest.onBeforeSendHeaders({ urls: ['<all_urls>'] }, (details, callback) => {
+    const headers = browserBrandRequestHeaders(details.requestHeaders, process.versions.chrome);
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === 'user-agent' && /\b(?:Electron|mixdog[\w-]*)\//i.test(headers[name])) {
+        headers[name] = browserPartitionUserAgent(headers[name]);
+      }
     }
-    if (!WEB_PROTOCOLS.has(parsed.protocol)) {
-      const allowedEmbedded = details.resourceType !== 'mainFrame' && EMBEDDED_ONLY_PROTOCOLS.has(parsed.protocol);
-      callback({ cancel: !allowedEmbedded });
+    callback({ requestHeaders: headers });
+  });
+  partitionSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+    const disposition = browserRequestDisposition(details.url, details.resourceType);
+    if (disposition !== 'web') {
+      callback({ cancel: disposition === 'deny' });
       return;
     }
     void host.assertResolvedResourceUrlAllowed(details.url).then(
@@ -70,10 +80,12 @@ export function createBrowserPartition(host: BrowserPartitionHost) {
   return {
     session: partitionSession,
     downloadLedger,
+    permissions,
     dispose(): void {
       partitionSession.removeListener('will-download', downloadLedger.onWillDownload);
       clearBrowserPermissionHandlers(partitionSession);
       partitionSession.webRequest.onBeforeRequest(null);
+      partitionSession.webRequest.onBeforeSendHeaders(null);
     },
   };
 }

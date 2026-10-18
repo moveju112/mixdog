@@ -92,10 +92,12 @@ function routeInput(source) {
   if (clean(source.model)) next.model = clean(source.model);
   if (clean(source.effort)) next.effort = clean(source.effort);
   if (typeof source.fast === 'boolean') next.fast = source.fast;
+  if (typeof source.autoEffort === 'boolean') next.autoEffort = source.autoEffort;
   if (Object.hasOwn(source, 'modelParameters')) next.modelParameters = { ...source.modelParameters };
   if (Object.hasOwn(source, 'contextPercent')) next.contextPercent = source.contextPercent;
   if (Object.hasOwn(source, 'contextTokens')) next.contextTokens = source.contextTokens;
   if (Object.hasOwn(source, 'disabled')) next.disabled = source.disabled;
+  if (Object.hasOwn(source, 'fallbacks')) next.fallbacks = source.fallbacks.map(routeInput);
   return next;
 }
 
@@ -118,6 +120,7 @@ function publicProviderRows(setup) {
     ...extra,
   });
   return {
+    ...(setup?.managedByClient === true ? { managedByClient: true, unavailable: setup.unavailable === true } : {}),
     pendingSecrets: setup?.pendingSecrets === true,
     api: (setup?.api || []).map((row) =>
       pick(row, {
@@ -139,6 +142,37 @@ function publicProviderRows(setup) {
       })
     ),
   };
+}
+
+/** Minimal provider rows for the model: only providers with a credential (or
+ *  one needing re-authentication), counts instead of account rosters. Without
+ *  `accountCount` (desktop-owned accounts) no counts are reported. */
+function configuredProviderRows(rows, accountCount) {
+  const providers = [];
+  let notConfigured = 0;
+  for (const [kind, list] of [
+    ['api', rows.api],
+    ['oauth', rows.oauth],
+    ['local', rows.local],
+  ]) {
+    for (const row of list) {
+      if (!row.authenticated && !row.reauthRequired) {
+        notConfigured += 1;
+        continue;
+      }
+      let accounts = {};
+      if (kind === 'oauth' && accountCount) accounts = { accounts: row.authenticated ? accountCount(row.id) : 0 };
+      providers.push({
+        id: row.id,
+        kind,
+        authenticated: row.authenticated,
+        status: row.status,
+        ...(row.reauthRequired ? { reauthRequired: true } : {}),
+        ...accounts,
+      });
+    }
+  }
+  return { ...(rows.pendingSecrets ? { pendingSecrets: true } : {}), providers, notConfigured };
 }
 
 /** OAuth account roster without usage meters or provider-side identities. */
@@ -300,8 +334,14 @@ const SETUP_STATUS_READERS = {
   'local-provider': (rt) => rt.getToolModuleSettings().localProvider,
   features: (rt, { getConfig }) => featureStatus(rt, getConfig),
   shell: (rt) => rt.getSystemShell?.() || {},
-  providers: async (rt) => {
+  providers: async (rt, { detail }) => {
     const rows = publicProviderRows(await rt.getProviderSetup?.({}));
+    // Client mode: the desktop owns accounts, so the server roster is never read.
+    if (rows.managedByClient) {
+      if (detail) return rows;
+      return { managedByClient: true, unavailable: rows.unavailable, ...configuredProviderRows(rows) };
+    }
+    if (!detail) return configuredProviderRows(rows, (id) => rt.getProviderAccounts(id).accounts.length);
     rows.oauth = rows.oauth.map((row) =>
       row.authenticated ? { ...row, accounts: publicAccounts(rt.getProviderAccounts(row.id)) } : row
     );
@@ -339,7 +379,10 @@ function validateSetupInput(args) {
     if (action !== 'set_agent_route' && Object.hasOwn(args.route, 'disabled')) {
       throw new Error('route.disabled is only accepted by set_agent_route');
     }
-    for (const field of ['contextPercent', 'contextTokens']) {
+    if (Object.hasOwn(args.route, 'fallbacks') && !['set_agent_route', 'set_web_search_route'].includes(action)) {
+      throw new Error('route.fallbacks is only accepted by set_agent_route and set_web_search_route');
+    }
+    for (const field of ['contextPercent', 'contextTokens', 'autoEffort']) {
       if (action !== 'set_route' && action !== 'set_agent_route' && Object.hasOwn(args.route, field)) {
         throw new Error(`route.${field} is only accepted by set_route and set_agent_route`);
       }
@@ -401,12 +444,12 @@ const SETUP_ACTION_HANDLERS = {
   status: async (_rt, args, { readStatus, requestDesktop }) => {
     const domain = clean(args.domain) || 'summary';
     requireEnum(domain, SETUP_STATUS_DOMAINS, 'domain');
-    return { domain, ...(await readStatus(domain, requestDesktop)) };
+    return { domain, ...(await readStatus(domain, requestDesktop, args.detail === true)) };
   },
   open: (_rt, args, { openSurface }) => openSurface(args.target),
   set_route: async (rt, args) => {
     const route = routeInput(args.route);
-    const next = await rt.setRoute(route);
+    const next = await rt.setRoute(route, { keepMainModel: false });
     return { route: next, appliesTo: 'next session (a conversation keeps its frozen route)' };
   },
   set_agent_route: async (rt, args) => {
@@ -524,6 +567,7 @@ const SETUP_ACTION_HANDLERS = {
   forget_provider_auth: async (rt, args) => {
     const name = requireText(args.name, 'name');
     const setup = await rt.getProviderSetup({});
+    if (setup?.managedByClient) throw new Error('Manage provider accounts in the local desktop window.');
     if (!(setup?.oauth || []).some((row) => row.id === name)) {
       if (Object.hasOwn(args, 'accountId')) throw new Error('accountId applies only to OAuth providers');
       return rt.forgetProviderAuth(name);
@@ -536,8 +580,12 @@ const SETUP_ACTION_HANDLERS = {
     const accountId = Object.hasOwn(args, 'accountId') ? requireText(args.accountId, 'accountId') : accounts[0].id;
     return { ...(await rt.forgetProviderAuth(name, accountId)), accountId };
   },
-  set_provider_account: async (rt, args) =>
-    publicAccounts(await rt.updateProviderAccounts(requireText(args.name, 'name'), args.providerAccount)),
+  set_provider_account: async (rt, args) => {
+    if ((await rt.getProviderSetup?.({}))?.managedByClient) {
+      throw new Error('Manage provider accounts in the local desktop window.');
+    }
+    return publicAccounts(await rt.updateProviderAccounts(requireText(args.name, 'name'), args.providerAccount));
+  },
   add_mcp_server: async (rt, args) => {
     const server = mcpServerInput(args);
     requireText(server.name, 'server.name');
@@ -631,11 +679,11 @@ export function createSetupToolExecutor({ getApi, getConfig, notifySessionUi, ge
     return facade;
   };
 
-  async function readStatus(domain, requestDesktop) {
+  async function readStatus(domain, requestDesktop, detail) {
     const rt = api();
     if (SETUP_DESKTOP_DOMAINS.includes(domain)) return requestDesktop({ action: 'status', domain });
     if (!Object.hasOwn(SETUP_STATUS_READERS, domain)) throw new Error(`setup: unknown status domain "${domain}"`);
-    return SETUP_STATUS_READERS[domain](rt, { domain, getConfig: () => getConfig?.() || {} });
+    return SETUP_STATUS_READERS[domain](rt, { domain, detail, getConfig: () => getConfig?.() || {} });
   }
 
   function openSurface(target) {
@@ -669,7 +717,7 @@ export function createSetupToolExecutor({ getApi, getConfig, notifySessionUi, ge
     dispose: desktop.dispose,
     async execute(args = {}, options = {}) {
       const result = await execute(args, options);
-      if (READ_ONLY_SETUP_ACTIONS.has(args.action)) return JSON.stringify(result ?? {}, null, 2);
+      if (READ_ONLY_SETUP_ACTIONS.has(args.action)) return JSON.stringify(result ?? {});
       await flushSettings?.();
       // Attached surfaces re-read what changed instead of waiting for their
       // next open or cache expiry.

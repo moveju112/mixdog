@@ -69,7 +69,7 @@ function sessionMenuItems(
     onSelect: afterMenu(() => actions.openSessionEditor(session, rowKey)),
   });
   if (onInheritSession && !archived) {
-    items.push({ id: 'inherit', label: t('Inherit session'), onSelect: () => onInheritSession(session.id) });
+    items.push({ id: 'inherit', label: t('Fork session'), onSelect: () => onInheritSession(session.id) });
   }
   if (archived) {
     items.push({
@@ -89,7 +89,7 @@ function sessionMenuItems(
       { id: 'archive', label: t('Archive'), onSelect: () => void onArchiveSession(session.id, true).catch(() => {}) }
     );
   }
-  // Keyboard path of the drag-to-folder move; membership only (cwd stays).
+  // Keyboard path of the drag-to-folder move: changes the session's working folder.
   const currentProjectKey = actions.sessionGroupKeys.get(session.id) ?? '';
   if (actions.onMoveSessionToProject && !archived && (projectGroups.length > 0 || onAddProject)) {
     const destinations: ScmContextMenuItem[] = projectGroups

@@ -1,9 +1,11 @@
 // Desktop project registry: the shared core projects.json store plus the
 // desktop-only preferences sidecar (aliases, pins, legacy hidden tombstones).
 import { isAbsolute, resolve } from 'node:path';
+import { PROJECT_UNAVAILABLE } from '../shared/file-error-codes';
 import { LocalAccessDeniedError } from './local-access-denied';
 
-import type { DesktopProjectSummary } from '../shared/contract';
+import type { DesktopProjectSummary, DesktopSessionSummary } from '../shared/contract';
+import { projectIdentity, sessionProjectKey } from '../shared/project-identity';
 import { readProjectPreferences, writeProjectPreferences } from './project-preferences-file';
 import type { DesktopProjectPreferences, MixdogProject, MixdogProjectsModule } from './desktop-support';
 import { matchingProjectPath, normalizedProjectKey, projectAlias, withoutMatchingProject } from './desktop-support';
@@ -58,6 +60,17 @@ export class DesktopProjectRegistry {
     return this.known(store, projectPath).path;
   }
 
+  /** Use the sidebar's membership rule without hiding registry read errors. */
+  async sessionProjectPath(session?: DesktopSessionSummary): Promise<string | null> {
+    const store: ProjectAuthorityStore = await this.loadProjectsModule();
+    const projects = this.registered(store, typeof store.listProjectsStrict === 'function');
+    const key = sessionProjectKey(
+      session ?? {},
+      projects.map((project) => projectIdentity(project.path))
+    );
+    return projects.find((project) => projectIdentity(project.path) === key)?.path ?? null;
+  }
+
   /** Mark an already-registered project as most-recently selected. */
   async touchSelected(registeredPath: string): Promise<string[]> {
     const store = await this.loadProjectsModule();
@@ -98,7 +111,7 @@ export class DesktopProjectRegistry {
   async remove(projectPath: string): Promise<string[]> {
     const store = await this.loadProjectsModule();
     const known = this.known(store, projectPath).path;
-    if (store.removeProject(known) !== true) throw new Error('Project is not available.');
+    if (!store.removeProject(known)) throw new Error('Project is not available.');
     const preferences = await this.loadPreferences();
     preferences.hidden = [known, ...withoutMatchingProject(preferences.hidden, known)];
     await this.savePreferences(store);
@@ -166,14 +179,16 @@ export class DesktopProjectRegistry {
 
   private known(store: ProjectAuthorityStore, projectPath: string): MixdogProject {
     const requested = projectPath.trim();
-    if (!requested) throw new LocalAccessDeniedError('Project is not available.');
+    if (!requested) throw new LocalAccessDeniedError('Project is not available.', PROJECT_UNAVAILABLE);
     const resolved = store.resolveProjectPath?.(requested) || resolve(requested);
     const key = normalizedProjectKey(resolved);
     const strict = typeof store.listProjectsStrict === 'function';
     const project = this.registered(store, strict).find((entry) => normalizedProjectKey(entry.path) === key);
     if (!project) {
-      const Refusal = strict ? LocalAccessDeniedError : Error;
-      throw new Refusal('Project is not available.');
+      // An older runtime's tolerant list cannot prove removal: that refusal
+      // is no denial, so it carries no denial code.
+      if (!strict) throw new Error('Project is not available.');
+      throw new LocalAccessDeniedError('Project is not available.', PROJECT_UNAVAILABLE);
     }
     return project;
   }

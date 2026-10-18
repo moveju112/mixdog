@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { consumeGeminiRestStreamResponse, consumeGeminiSdkStream } from './gemini-stream.mjs';
+import {
+  consumeGeminiRestStreamResponse,
+  consumeGeminiSdkStream,
+  createGeminiTextLeakGuard,
+} from './gemini-stream.mjs';
 
 const protocols = [
   {
@@ -74,6 +78,29 @@ for (const { name, consume } of protocols) {
     assert.deepEqual(text, ['visible']);
   });
 
+  for (const deferToolCalls of [true, false]) {
+    test(`Gemini ${name} cut stream with a text-leaked call is ${deferToolCalls ? 'replayable when the call is held back' : 'a replay boundary when the call is dispatched'}`, async () => {
+      const dispatched = [];
+      const textLeakGuard = createGeminiTextLeakGuard({
+        knownToolNames: ['read'],
+        onToolCall: (call) => dispatched.push(call),
+        deferToolCalls,
+      });
+      const leaked = '<invoke name="read"><parameter name="path">a.txt</parameter></invoke>';
+      await assert.rejects(
+        consume([{ candidates: [{ content: { parts: [{ text: leaked }] } }] }], { label: 'fixture', textLeakGuard }),
+        (error) => {
+          assert.equal(error.code, 'TRUNCATED_STREAM');
+          assert.equal(textLeakGuard.getLeakedToolCalls().length, 1);
+          assert.equal(error.emittedToolCall, deferToolCalls ? undefined : true);
+          assert.equal(error.unsafeToRetry, deferToolCalls ? undefined : true);
+          return true;
+        }
+      );
+      assert.equal(dispatched.length, deferToolCalls ? 0 : 1);
+    });
+  }
+
   test(`Gemini ${name} completion retains ordered native tool parts and signatures`, async () => {
     const parts = [{ text: 'answer' }, nativePart];
     const response = await consume(
@@ -85,4 +112,62 @@ for (const { name, consume } of protocols) {
     assert.deepEqual(response.candidates[0].content, { role: 'model', parts });
     assert.equal(response.candidates[0].finishReason, 'STOP');
   });
+
+  const inBand = {
+    error: {
+      code: 429,
+      status: 'RESOURCE_EXHAUSTED',
+      message: 'quota gone',
+      details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '5s' }],
+    },
+  };
+  const assertInBand = (error) => {
+    assert.equal(error.status, 429);
+    assert.equal(error.code, 'resource_exhausted');
+    assert.equal(error.retryAfterMs, 5000);
+    assert.equal(error.details.length, 1);
+    return true;
+  };
+
+  test(`Gemini ${name} in-band error envelope throws before dispatching text`, async () => {
+    const text = [];
+    await assert.rejects(consume([inBand], { label: 'fixture', onTextDelta: (d) => text.push(d) }), assertInBand);
+    assert.deepEqual(text, []);
+  });
+
+  test(`Gemini ${name} in-band error after STOP does not become success`, async () => {
+    await assert.rejects(
+      consume(
+        [{ candidates: [{ content: { role: 'model', parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] }, inBand],
+        { label: 'fixture' }
+      ),
+      assertInBand
+    );
+  });
 }
+
+test('Gemini REST in-band error in the unterminated tail is typed, not corruption', async () => {
+  await assert.rejects(
+    consumeGeminiRestStreamResponse(
+      new Response(`data: ${JSON.stringify({ error: { code: 503, status: 'UNAVAILABLE' } })}`),
+      {
+        label: 'fixture',
+      }
+    ),
+    (error) => error.status === 503 && error.code === 'unavailable' && !error.truncatedStream
+  );
+});
+
+test('Gemini REST first-chunk window follows the caller and names its phase', { timeout: 5000 }, async (t) => {
+  const silent = new Response(new ReadableStream({ start() {} }));
+  // The watchdog timer is unref'd; keep the loop alive while it runs.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
+  await assert.rejects(
+    consumeGeminiRestStreamResponse(silent, { label: 'fixture', firstByteTimeoutMs: 25 }),
+    (error) =>
+      error.code === 'EGEMINITIMEOUT' &&
+      error.timeoutPhase === 'first-chunk' &&
+      /fixture first byte timed out after 25ms/.test(error.message)
+  );
+});

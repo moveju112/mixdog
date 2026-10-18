@@ -2,6 +2,7 @@ import type { TranscriptItem } from './desktop-types';
 import type { TurnChangesRef } from './turn-changes-model';
 import { completionTone } from './transcript-primitives';
 import { isVisibleTranscriptItem } from './transcript-row';
+import { streamingTextPaints } from './use-paced-transcript-text';
 // @ts-expect-error The shared runtime module is plain ESM and has no declaration file.
 import { isTranscriptCancelledStatusText } from '../../../../src/runtime/shared/tool-execution-contract.mjs';
 
@@ -34,6 +35,10 @@ export type TranscriptRowModel =
       completion?: TranscriptItem;
       active?: boolean;
       live?: boolean;
+      /** Nothing but the live activity band follows this part: its streamed
+       *  text may still be revealing. Any later row (a tool card, the next
+       *  part) clears it, which reveals the text whole in that same commit. */
+      newest?: boolean;
       /** This row holds the last turndone of a checkpoint: its changed-files card follows. */
       turnChanges?: TurnChangesRef;
     }
@@ -262,6 +267,9 @@ interface SettledTranscriptProjection {
   currentTurnKey: string;
   previousRowWasUser: boolean;
   itemCount: number;
+  /** The last settled item is a successful completion folded into its
+   *  assistant row: that row's footer now stands where the live band was. */
+  endsWithFoldedCompletion: boolean;
   hasSettledItem(id: unknown): boolean;
 }
 
@@ -476,6 +484,7 @@ export function projectSettledTranscriptRows({
     currentTurnKey: builder.currentTurnKey,
     previousRowWasUser: builder.previousRowWasUser,
     itemCount: items.length,
+    endsWithFoldedCompletion: items.length > 0 && foldedCompletions.has(items.length - 1),
     hasSettledItem: settledItemLookup(items),
   };
 }
@@ -512,7 +521,13 @@ export function appendLiveTranscriptRows({
   // A delayed lane can briefly publish a tail whose id has already settled.
   // Never create a second stable-key row for that stale publication.
   const liveItemAlreadySettled = liveItem?.id != null && settled.hasSettledItem(liveItem.id);
-  if (liveItem && !liveItemAlreadySettled) {
+  // A streaming reply with no word to paint yet (only an unfinished first
+  // word) opens no row: its row takes a line and moves the band below it, so
+  // the followed transcript moved up before any reply text painted. It opens
+  // with the arrival that completes a word, which it paints in that commit.
+  const liveItemPaintsNothing =
+    liveItem?.kind === 'assistant' && Boolean(liveItem.streaming) && !streamingTextPaints(String(liveItem.text || ''));
+  if (liveItem && !liveItemAlreadySettled && !liveItemPaintsNothing) {
     beginBuilderTurn(builder, sessionKey, activeTurnKey);
     builder.rows.push({
       _tag: 'AssistantPart',
@@ -533,6 +548,13 @@ export function appendLiveTranscriptRows({
       active: true,
     });
     builder.previousRowWasUser = false;
+  }
+
+  let newest = builder.rows.length - 1;
+  while (newest >= 0 && builder.rows[newest]._tag === 'Thinking') newest -= 1;
+  const newestRow = builder.rows[newest];
+  if (newestRow?._tag === 'AssistantPart' && newestRow.item.kind === 'assistant') {
+    builder.rows[newest] = { ...newestRow, newest: true };
   }
 
   queuedPrompts.forEach((item, index) => {

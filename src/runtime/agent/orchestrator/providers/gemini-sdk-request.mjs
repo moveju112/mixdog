@@ -20,6 +20,7 @@ export function geminiTextLeakGuardFor({ tools, callbacks }) {
     onTextDelta: callbacks.onTextDelta,
     onToolCall: callbacks.onToolCall,
     onStreamDelta: callbacks.onStreamDelta,
+    deferToolCalls: true,
   });
 }
 
@@ -71,7 +72,7 @@ function linkSdkRequestController(attemptSignal) {
   return { controller, detachParent, clearConnectTimer };
 }
 
-export async function streamGeminiSdkAttempt(genModel, stream, attemptSignal) {
+export async function streamGeminiSdkAttempt(genModel, stream, attemptSignal, onConnected = null) {
   const { contents, callbacks } = stream;
   const link = linkSdkRequestController(attemptSignal);
   const { controller } = link;
@@ -89,6 +90,7 @@ export async function streamGeminiSdkAttempt(genModel, stream, attemptSignal) {
     // the parent link attached so a later abort during streaming still
     // reaches the request.
     link.clearConnectTimer();
+    onConnected?.();
     const textLeakGuard = geminiTextLeakGuardFor(stream);
     const response = await consumeGeminiSdkStream(streamResult, {
       signal: attemptSignal,

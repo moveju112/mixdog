@@ -31,12 +31,32 @@ async function resumeDueEntry(entry, { store, materializeSession, readQuotaUsabl
   }
   if (!isCurrent(store, entry)) return 'cancelled';
   let usable = false;
+  const currentRoute = () => {
+    const snapshot = runtime.getState?.() ?? {};
+    return {
+      // The selected route is what the next turn runs on; sessionProvider /
+      // sessionModel still hold the previous turn's after a deferred selection.
+      provider: snapshot.provider || snapshot.sessionProvider || runtime.session?.provider || entry.provider,
+      model: snapshot.model || snapshot.sessionModel || runtime.session?.model || entry.model,
+    };
+  };
+  const { provider, model } = currentRoute();
   try {
-    usable = await readQuotaUsable(entry.provider, entry.model);
+    usable = await readQuotaUsable(provider, model);
   } catch (error) {
-    log(`quota resume usage reading failed provider=${entry.provider}: ${error?.message || error}`);
+    log(`quota resume usage reading failed provider=${provider}: ${error?.message || error}`);
   }
   if (!isCurrent(store, entry)) return 'cancelled';
+  const selected = currentRoute();
+  if (selected.provider !== provider || selected.model !== model) {
+    // The reading belongs to the old route. Preserve the reservation and
+    // check the selected route on the normal busy-recheck cadence.
+    store.deferQuotaResumeEntry(sessionId, generation, {
+      resetAt: now() + QUOTA_RESUME_BUSY_RECHECK_MS,
+      attempts: entry.attempts,
+    });
+    return 'route-changed';
+  }
   if (!usable) {
     // One more reading five minutes on; after that the session falls back
     // to the user's own choice.
@@ -51,8 +71,8 @@ async function resumeDueEntry(entry, { store, materializeSession, readQuotaUsabl
     return 'exhausted';
   }
   const outcome =
-    typeof runtime?.fireQuotaResume === 'function' ? runtime.fireQuotaResume({ generation }) : 'unsupported';
-  if (outcome === 'busy') {
+    typeof runtime?.fireQuotaResume === 'function' ? await runtime.fireQuotaResume({ generation }) : 'unsupported';
+  if (outcome === 'busy' || outcome === 'rejected') {
     store.deferQuotaResumeEntry(sessionId, generation, {
       resetAt: now() + QUOTA_RESUME_BUSY_RECHECK_MS,
       attempts: entry.attempts,
@@ -109,7 +129,10 @@ export function createQuotaResumeScheduler({
           log(`quota resume session=${entry.sessionId} outcome=${outcome}`);
         } catch (error) {
           log(`quota resume failed session=${entry.sessionId}: ${error?.message || error}`);
-          store.cancelQuotaResumeEntry(entry.sessionId, { generation: entry.generation });
+          store.deferQuotaResumeEntry(entry.sessionId, entry.generation, {
+            resetAt: now() + QUOTA_RESUME_RETRY_MS,
+            attempts: entry.attempts,
+          });
         }
       }
     })().finally(() => {

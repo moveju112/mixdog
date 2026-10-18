@@ -53,6 +53,7 @@ import { useComposerMessageSelector } from './use-composer-message-selector';
 import { useComposerNotice } from './use-composer-notice';
 import { useComposerPalettes } from './use-composer-palettes';
 import { createSlashExecutor } from './composer-slash-executor';
+import { BtwCard, useBtwCard } from './BtwCard';
 import { readCachedModelCatalog } from './model-catalog-cache';
 import { modelOffersUltrafast } from './model-route-utils';
 import {
@@ -270,6 +271,10 @@ export type ComposerProps = {
   /** This pane is the focused, visible one. A payload shared into the app from
    *  outside (share sheet) may only land in a composer the user can see. */
   paneActive?: boolean;
+  /** Replaces the rotating placeholder (a pending question: sending answers it). */
+  placeholderOverride?: string;
+  /** Set while a question waits: "Steer now" on a plain queued follow-up answers it. */
+  answerQuestion?: ((reply: string) => Promise<unknown>) | null;
 };
 
 export const Composer = memo(function Composer(props: ComposerProps) {
@@ -303,6 +308,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     hiddenQueueIds,
     pendingSubmissionIds,
     onQueuedRestored,
+    answerQuestion,
     promptRestore,
     userMessages,
     submit,
@@ -312,6 +318,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     onOpenSettings,
     dropTargetRef,
     paneActive = true,
+    placeholderOverride,
   } = props;
   const [draft, setDraft] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -426,6 +433,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     mergeRestoredAttachments,
     showNotice: showComposerNotice,
     onQueuedRestored,
+    answerQuestion,
     scope: historyScope,
   });
   useComposerPromptRestore({ promptRestore, setDraft, draftRef, textarea, onQueuedRestored });
@@ -439,7 +447,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
     historyNavigation: history.navigation,
     showNotice: showComposerNotice,
   });
-  const skillCatalog = useSkillCatalog(sessionId, projectScope, composerFocused);
+  const skillCatalog = useSkillCatalog(sessionId, projectScope);
   const isEnabledSkill = useCallback((name: string) => skillCatalog.enabled.has(name), [skillCatalog]);
   const palettes = useComposerPalettes({
     draft,
@@ -481,12 +489,14 @@ export const Composer = memo(function Composer(props: ComposerProps) {
       setDraggingFiles,
     });
   }, [identityScope, resetAttachments, clearNotice, palettes.reset, palettes.invalidateSearch, selector.reset]);
-  const placeholder = composerPlaceholder({
-    hasConversation,
-    turnBusy,
-    commandBusy,
-    fallback: COMPOSER_PLACEHOLDERS[0],
-  });
+  const placeholder =
+    placeholderOverride ||
+    composerPlaceholder({
+      hasConversation,
+      turnBusy,
+      commandBusy,
+      fallback: COMPOSER_PLACEHOLDERS[0],
+    });
   // Autosize is CSS-native now (field-sizing: content). The old layout-effect
   // path forced TWO whole-document synchronous reflows per keystroke
   // (height:auto → scrollHeight read) — the measured source of typing lag on
@@ -505,9 +515,11 @@ export const Composer = memo(function Composer(props: ComposerProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: identityScope and paneActive are reset triggers; the effect body does not read them
   useEffect(() => setEditingPasteId(null), [identityScope, paneActive]);
   const editingPaste = attachments.find((attachment) => attachment.id === editingPasteId);
+  const btw = useBtwCard(sessionId, paneActive, selector.open || slash.open || mention.open || skillMention.open);
   const executeSlash = createSlashExecutor({
     draftMode,
     sessionId,
+    onBtw: btw.ask,
     turnBusy,
     provider,
     model,
@@ -704,6 +716,7 @@ export const Composer = memo(function Composer(props: ComposerProps) {
           queueTray
         )}
       <ComposerBanners draggingFiles={draggingFiles} transitioning={transitioning} dropTarget={dropTargetRef.current} />
+      {btw.card && <BtwCard card={btw.card} onClose={btw.close} onRetry={btw.retry} />}
       <form
         ref={paletteAnchor}
         className="composer"
@@ -731,7 +744,13 @@ export const Composer = memo(function Composer(props: ComposerProps) {
             commands={slash.commands}
             index={slash.index}
             setIndex={slash.setIndex}
-            onSelect={(usage) => void send(usage)}
+            onSelect={(usage) => {
+              // /btw needs a question: complete the command instead of sending it bare.
+              if (usage !== '/btw') return void send(usage);
+              draftRef.current = '/btw ';
+              setDraft('/btw ');
+              textarea.current?.focus();
+            }}
           />
         )}
         {mention.open && (

@@ -12,22 +12,35 @@ export function createAgentTurns({
   retainUnwatched,
   createSession,
   takeWatchdogStop,
+  takeCancelTranscript,
 }) {
-  const createAgentChild = createAgentChildFactory({ registry, rehydrateAgentSessions, createSession });
+  const createAgentChild = createAgentChildFactory({
+    registry,
+    rehydrateAgentSessions,
+    createSession,
+    entryForSession,
+  });
 
-  // The progress watchdog stopped the turn: rethrow its stall error carrying
-  // the assistant text the turn produced, so the owner still gets a partial
-  // result.
-  async function watchdogStopError(runtime, error, messageStart) {
-    const { messages } = await runtime.readModelMessages(messageStart);
-    const partial = partialHandoffTextFromSession({ messages });
-    if (partial) error.partialHandoff = partial;
+  // The turn was stopped (progress watchdog or cancellation): rethrow its error
+  // carrying the assistant text the turn produced, so the owner still gets a
+  // partial result. A cancel that closed the session captured the transcript
+  // before the close cleared it.
+  async function withPartialHandoff(runtime, sessionId, error, messageStart) {
+    try {
+      const captured = takeCancelTranscript(sessionId);
+      const messages = captured
+        ? captured.slice(messageStart)
+        : (await runtime.readModelMessages(messageStart)).messages;
+      const partial = partialHandoffTextFromSession({ messages });
+      if (partial) error.partialHandoff = partial;
+    } catch {}
     return error;
   }
 
   async function runAgentTurn({ session, prompt, context = null, onToolResult, onTerminalResult } = {}) {
     await rehydrateAgentSessions();
     const sessionId = String(session?.id || session || '').trim();
+    const cancelEpoch = registry.assertAdmission(sessionId);
     const descriptor = registry.get(sessionId);
     if (!descriptor || descriptor.closed) {
       throw new Error(`agent session ${sessionId || '(empty)'} is closed`);
@@ -39,14 +52,17 @@ export function createAgentTurns({
       toolMode: 'full',
     });
     const target = entry.runtime.submitAndWait;
+    registry.assertAdmission(sessionId, cancelEpoch);
     if (typeof target !== 'function') {
       throw new TypeError('session runtime must implement submitAndWait');
     }
     // A stop left over from an earlier turn must not relabel this one.
     takeWatchdogStop(sessionId);
+    takeCancelTranscript(sessionId);
     // Transcript length before this turn: where a watchdog stop's partial
     // output starts.
     const { messageCount: messageStart } = await entry.runtime.readModelMessages(Number.MAX_SAFE_INTEGER);
+    registry.assertAdmission(sessionId, cancelEpoch);
     descriptor.status = 'running';
     descriptor.stage = 'running';
     descriptor.updatedAt = Date.now();
@@ -64,9 +80,16 @@ export function createAgentTurns({
         throw new Error(String(detail.error || 'agent session turn failed'));
       }
       if (detail?.status === 'cancelled') {
-        const watchdogStop = takeWatchdogStop(sessionId);
-        if (watchdogStop) throw await watchdogStopError(entry.runtime, watchdogStop, messageStart);
-        throw new Error('agent session turn cancelled');
+        const stop = takeWatchdogStop(sessionId) || new Error('agent session turn cancelled');
+        throw await withPartialHandoff(entry.runtime, sessionId, stop, messageStart);
+      }
+      // Only a completed turn has a result; a rejected submission (session
+      // closing/terminal, steering persist failure) or any unknown status is a
+      // failure, never an empty completion.
+      if (detail?.status !== 'done' && detail?.status !== 'completed') {
+        const status = String(detail?.status || 'unknown');
+        const reason = String(detail?.reason || detail?.error || '').trim();
+        throw new Error(`agent turn ${status}${reason ? `: ${reason}` : ''}`);
       }
       const result = detail?.result || { content: '' };
       descriptor.status = 'idle';
@@ -81,6 +104,7 @@ export function createAgentTurns({
       descriptor.stage = descriptor.status;
       throw error;
     } finally {
+      takeCancelTranscript(sessionId);
       descriptor.updatedAt = Date.now();
       retainUnwatched(entry, 'agent child idle');
     }
